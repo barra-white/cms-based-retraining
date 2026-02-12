@@ -2,10 +2,6 @@ import yfinance as yf
 import pandas as pd
 from pathlib import Path
 
-from datetime import datetime
-
-import json
-
 
 # Static variables for data retrieval and storage
 
@@ -44,7 +40,7 @@ TICKERS = {
     }
 }
 
-# Functions
+# functions
 def setup_dirs():
     """
     Creates directory structure
@@ -53,91 +49,6 @@ def setup_dirs():
     for d in dirs:
         Path(d).mkdir(parents=True, exist_ok=True)
         
-        
-
-def get_sector_etfs(sectors: list[str]) -> dict[str, dict[str, str]]:
-    """
-    Retrieves ETFs for each sector using yfinance and returns a dictionary
-    
-    Args:
-        sectors (list[str]): List of sector names to retrieve ETFs for
-        
-    Returns:
-        dict: {ticker: {name: str, sector: str}} mapping ETF tickers to their names and sectors
-    """
-    print("Retrieving sector ETFs...")
-    
-    sector_etfs = {}
-    
-    sector_num = 1
-    # iterate through each sector and retrieve top ETFs
-    for sector in sectors:
-        print(f"\nProcessing sector {sector_num}: {sector}")
-        
-        try:
-            yf_sector = yf.Sector(sector)
-            etfs = yf_sector.top_etfs # get top ETFs for the sector
-            
-            # handle no etfs found
-            if not etfs:
-                print(f"No ETFs found for sector: {sector}")
-                continue
-            
-            etfs_list = list(etfs.items())
-            
-            # show top 3 ETFs for the sector
-            print(f"Top ETFs for {sector}:")
-            for i, (ticker, name) in enumerate(etfs_list[:3]):
-                print(f"\t{i+1}. {ticker} - {name}")
-                
-            # get top etf and store
-            selected_ticker = etfs_list[0][0] # select the top ETF ticker
-            selected_name = etfs_list[0][1] # select the top ETF name
-            
-            sector_etfs[selected_ticker] = {
-                "name": selected_name,
-                "sector": sector
-            }
-            
-            
-            print(f"Selected ETF for {sector}: {selected_ticker} - {selected_name}")
-            
-        except Exception as e:
-            print(f"Error retrieving sector {sector}: {e}")
-            continue
-        
-        sector_num += 1
-        
-    print("\n\n\nSector ETF retrieval complete.")
-    
-    # check to see if all sectors were processed
-    if sector_num - 1 != len(sectors):
-        print(f"Warning: Retrieved ETFs for {sector_num - 1} out of {len(sectors)} sectors.")
-    
-    return sector_etfs
-
-
-
-def build_ticker_dict():
-    """
-    Builds complete ticker dictionary
-    """
-    print("Building complete ticker dictionary...")
-    
-    all_tickers = TICKERS.copy() # start with predefined tickers
-    all_tickers["sectors"] = get_sector_etfs(SECTORS) # add sector ETFs
-    
-    # summary
-    total_tickers = 0
-    for cat, tickers in all_tickers.items():
-        print(f"\n{cat.upper()}: {len(tickers)} tickers")
-        for ticker in tickers:
-            total_tickers += 1
-            
-    print(f"\nTotal tickers to retrieve: {total_tickers}")
-    
-    print(all_tickers)
-    return all_tickers
 
 
 def download_ticker(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -171,6 +82,7 @@ def download_ticker(ticker: str, start_date: str, end_date: str) -> pd.DataFrame
         return pd.DataFrame() # return empty DataFrame on error
     
     
+    
 def extract_features(ticker: str, data) -> dict:
     """Extracts Close price from data."""
     features = {}
@@ -187,12 +99,12 @@ def extract_features(ticker: str, data) -> dict:
         # Verify it's a Series now
         if isinstance(close_data, pd.Series):
             features[clean_name] = close_data
-            print(f"  ✓ Extracted {len(close_data)} points")
+            print(f"Extracted {len(close_data)} points")
         else:
-            print(f"  ✗ Failed: type is {type(close_data)}")
+            print(f"Failed: type is {type(close_data)}")
             
     except Exception as e:
-        print(f"  ✗ Error: {e}")
+        print(f"Error: {e}")
     
     return features
 
@@ -212,10 +124,13 @@ def download_all(ticker_dict: dict[str, dict[str, str]], start_date: str, end_da
     all_features = {}
     failed_tickers = []
     
+    
     print("\nStarting download and feature extraction for all tickers...")
+    
     for category, tickers in ticker_dict.items():
         print("\n\n\n" + "=" * 60)
         print(f"Processing category: {category}")
+
 
         for ticker, info in tickers.items():
             name = info if isinstance(info, str) else info.get("name", ticker) # get name from info dict or use ticker as fallback
@@ -245,6 +160,7 @@ def download_all(ticker_dict: dict[str, dict[str, str]], start_date: str, end_da
             print(f'{len(data):>4} dats [{len(features)} features]')
     print("\nDownload and feature extraction complete for all tickers.")
     
+    
     # summary of failed tickers
     if failed_tickers:
         print("\nThe following tickers failed to download or extract features:")
@@ -253,6 +169,7 @@ def download_all(ticker_dict: dict[str, dict[str, str]], start_date: str, end_da
     else:
         print("\nAll tickers processed successfully with extracted features.")
         
+        
     # debugging: check whats in all_features
     if not all_features:
         print("\nChecking: all_features contents")
@@ -260,13 +177,17 @@ def download_all(ticker_dict: dict[str, dict[str, str]], start_date: str, end_da
             print(f"\t{k}: type={type(v)}, length={len(v) if hasattr(v, '__len__') else 'N/A'}")
     combined = pd.DataFrame(all_features)
     
+    
     try:
         print("\nCreating combined DataFrame...")
         combined = pd.DataFrame(all_features)
     except Exception as e:
         print(f"Error creating combined DataFrame: {e}")
-        return pd.DataFrame() # return empty DataFrame on error    
+        return pd.DataFrame() # return empty DataFrame on error   
+    
+     
     missing = combined.isnull().sum()
+    
     if missing.any():
         print("\nWarning: Missing data detected in combined DataFrame:")
         for col, count in missing[missing > 0].items():
@@ -279,7 +200,7 @@ def download_all(ticker_dict: dict[str, dict[str, str]], start_date: str, end_da
 
 def main():
     setup_dirs()
-    ticker_dict = build_ticker_dict()
+    ticker_dict = TICKERS
     combined_data = download_all(ticker_dict, START_DATE, END_DATE)
     
     
