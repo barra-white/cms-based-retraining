@@ -36,7 +36,10 @@ TICKERS = {
         "UUP": "US Dollar Index", # dollar etf
         "TLT": "iShares 20+ Year Treasury Bond ETF", # long-term bond index
         "GLD": "SPDR Gold Shares ETF", # gold price indicator
-        "HYG": "iShares iBoxx $ High Yield Corporate Bond ETF" # high-yield bond index
+        "HYG": "iShares iBoxx $ High Yield Corporate Bond ETF", # high-yield bond index
+        "^MOVE": "MOVE Index", # bond market volatility indicator
+        "USO": "United States Oil Fund", # oil price indicator
+        "^OVX": "CBOE Crude Oil Volatility Index" # oil volatility indicator
     }
 }
 
