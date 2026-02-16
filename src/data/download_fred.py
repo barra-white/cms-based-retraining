@@ -24,7 +24,10 @@ FRED_SERIES = {
     "UNRATE": ("Unemployment Rate", "monthly"),
     "CPIAUCSL": ("Consumer Price Index", "monthly"),
     "FEDFUNDS": ("Federal Funds Rate", "monthly"),
-    "M2SL": ("M2 Money Supply", "monthly")
+    "M2SL": ("M2 Money Supply", "monthly"),
+    "DGS10": ("10-Year Treasury Constant Maturity Rate", "daily"),
+    "DFF": ("Effective Federal Funds Rate", "daily"),
+    "INDPRO": ("Industrial Production Index", "monthly")
 }
 
 
