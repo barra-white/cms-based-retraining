@@ -1,58 +1,26 @@
 import yfinance as yf
 import pandas as pd
-from pathlib import Path
+from utils import setup_dirs
 
-
-# Static variables for data retrieval and storage
 
 # start and end dates for data retrieval
 START_DATE = "2017-01-01"
 END_DATE = "2025-12-31"
 
-# list of different sectors to retrieve ETF data from
-SECTORS = [
-    "technology",
-    "financial-services",
-    "energy",
-    "healthcare",
-    "consumer-defensive",
-    "industrials",
-    "utilities",
-    "basic-materials",
-    "real-estate",
-    "communication-services"
-]
-
-# other tickers used for indices and indicators
-#indices == target variables for prediction
+# tickers dict
 TICKERS = {
-    "indices": {
-        "SPY": "S&P 500 ETF", # large-cap index
-        "QQQ": "NASDAQ 100 ETF", # large-cap tech-focused index
-        "IWM": "Russell 2000 ETF" # small-cap index
-    },
-    "indicators": {
-        "^VIX": "CBOE Volatility Index", # market volatility indicator
-        "UUP": "US Dollar Index", # dollar etf
-        "TLT": "iShares 20+ Year Treasury Bond ETF", # long-term bond index
-        "GLD": "SPDR Gold Shares ETF", # gold price indicator
-        "HYG": "iShares iBoxx $ High Yield Corporate Bond ETF", # high-yield bond index
-        "^MOVE": "MOVE Index", # bond market volatility indicator
-        "USO": "United States Oil Fund", # oil price indicator
-        "^OVX": "CBOE Crude Oil Volatility Index" # oil volatility indicator
-    }
+    "SPY": "S&P 500 ETF", # target
+    "QQQ": "NASDAQ 100 ETF", # target check
+    "IWM": "Russell 2000 ETF", # target check
+    "TLT": "iShares 20+ Year Treasury Bond ETF", # asset
+    "GLD": "SPDR Gold Shares ETF", # asset
+    "HYG": "iShares iBoxx $ High Yield Corporate Bond ETF", # asset
+    "UUP": "Dollar Index Bullish Fund ETF", # asset
+    "^VIX": "VIX Index", # volatility index
+    "^OVX": "Crude Oil Volatility Index", # volatility index
+    "^MOVE": "MOVE Index", # volatility index
+    "USO": "United States Oil Fund ETF" # asset
 }
-
-# functions
-def setup_dirs():
-    """
-    Creates directory structure
-    """
-    dirs = ["data/raw/yfinance", "data/processed"]
-    for d in dirs:
-        Path(d).mkdir(parents=True, exist_ok=True)
-        
-
 
 def download_ticker(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     """
@@ -75,31 +43,34 @@ def download_ticker(ticker: str, start_date: str, end_date: str) -> pd.DataFrame
             keepna=False,
             auto_adjust=True
         )
+        
         if len(data) == 0:
             print(f"No data found for {ticker}.")
             return pd.DataFrame() # return empty DataFrame if no data
+        
         print(f"Successfully downloaded data for {ticker}.")
         return data
+    
     except Exception as e:
         print(f"Error downloading data for {ticker}: {e}")
         return pd.DataFrame() # return empty DataFrame on error
-    
-    
-    
+
+
+
 def extract_features(ticker: str, data) -> dict:
     """Extracts Close price from data."""
     features = {}
     clean_name = ticker.replace("^", "")
     
     try:
-        # Get Close column - handle both Series and DataFrame
+        # get close
         close_data = data['Close']
         
-        # Convert to Series if it's a DataFrame
+        # convert to Series if it's a DataFrame
         if isinstance(close_data, pd.DataFrame):
             close_data = close_data.squeeze()  # Convert single-column DF to Series
         
-        # Verify it's a Series now
+        # verify it's a Series now
         if isinstance(close_data, pd.Series):
             features[clean_name] = close_data
             print(f"Extracted {len(close_data)} points")
@@ -130,37 +101,35 @@ def download_all(ticker_dict: dict[str, dict[str, str]], start_date: str, end_da
     
     print("\nStarting download and feature extraction for all tickers...")
     
-    for category, tickers in ticker_dict.items():
-        print("\n\n\n" + "=" * 60)
-        print(f"Processing category: {category}")
+    
 
 
-        for ticker, info in tickers.items():
-            name = info if isinstance(info, str) else info.get("name", ticker) # get name from info dict or use ticker as fallback
-            print("=" * 60)
-            print(f"Processing ticker: {ticker} - {name}")
-            
-            # download
-            data = download_ticker(ticker, start_date, end_date)
-            
-            if data is None or data.empty:
-                print(f"Skipping feature extraction for {ticker} due to no data.")
-                continue
-            
-            # print data shape
-            print(f'Downloaded: {data.shape[0]} rows and {data.shape[1]} columns for {ticker}')
-            
-            features = extract_features(ticker, data)
-            
-            # debugging: check if features is empty
-            if not features:
-                print(f"Warning: No features extracted for {ticker}.")
-                failed_tickers.append(ticker)
-                continue
-            all_features.update(features)
-            
-            print(f'\nCompleted processing for {ticker} - {name}')
-            print(f'{len(data):>4} dats [{len(features)} features]')
+    for ticker, info in ticker_dict.items():
+        name = ticker_dict[ticker]
+        print("=" * 60)
+        print(f"Processing ticker: {ticker} - {name}")
+        
+        # download
+        data = download_ticker(ticker, start_date, end_date)
+        
+        if data is None or data.empty:
+            print(f"Skipping feature extraction for {ticker} due to no data.")
+            continue
+        
+        # print data shape
+        print(f'Downloaded: {data.shape[0]} rows and {data.shape[1]} columns for {ticker}')
+        
+        features = extract_features(ticker, data)
+        
+        # debugging: check if features is empty
+        if not features:
+            print(f"Warning: No features extracted for {ticker}.")
+            failed_tickers.append(ticker)
+            continue
+        all_features.update(features)
+        
+        print(f'\nCompleted processing for {ticker} - {name}')
+        print(f'{len(data):>4} dats [{len(features)} features]')
     print("\nDownload and feature extraction complete for all tickers.")
     
     
@@ -197,7 +166,7 @@ def download_all(ticker_dict: dict[str, dict[str, str]], start_date: str, end_da
             pct = (count / len(combined)) * 100
             print(f"\t{col}: {count} missing values ({pct:.2f})")
 
-    combined.to_csv("data/processed/yfinance_combined.csv", index=True)
+    combined.to_csv("data/raw/yfinance_tickers.csv", index=True)
     
     return combined
 
@@ -205,6 +174,7 @@ def main():
     setup_dirs()
     ticker_dict = TICKERS
     combined_data = download_all(ticker_dict, START_DATE, END_DATE)
+
     
     
 if __name__ == "__main__":
