@@ -1,6 +1,6 @@
 import pandas as pd
 
-YFINANCE_FILE = "data/raw/yfinance_combined.csv"
+YFINANCE_FILE = "data/raw/yfinance_tickers.csv"
 FRED_FILE = "data/raw/fred_data_raw.csv"
 
 OUTPUT_FILE = "data/processed/combined_data.csv"

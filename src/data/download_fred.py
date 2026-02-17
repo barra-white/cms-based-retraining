@@ -1,6 +1,6 @@
 from fredapi import Fred
 from dotenv import load_dotenv
-from datetime import datetime
+from utils import setup_dirs
 
 import pandas as pd
 
@@ -17,17 +17,11 @@ END_DATE = "2025-12-31"
 
 # series: shows id: (name, frequency)
 FRED_SERIES = {
-    "T10Y2Y": ("10Y-2Y Treasury Yield Spread", "daily"), #
+    "T10Y2Y": ("10Y-2Y Treasury Yield Spread", "daily"),
     "BAA10Y": ("BAA-10Y Credit Spread", "daily"),
     "USEPUINDXD": ("US Economic Policy Uncertainty Index", "daily"),
-    "GDP": ("Gross Domestic Product", "quarterly"),
-    "UNRATE": ("Unemployment Rate", "monthly"),
-    "CPIAUCSL": ("Consumer Price Index", "monthly"),
-    "FEDFUNDS": ("Federal Funds Rate", "monthly"),
-    "M2SL": ("M2 Money Supply", "monthly"),
     "DGS10": ("10-Year Treasury Constant Maturity Rate", "daily"),
-    "DFF": ("Effective Federal Funds Rate", "daily"),
-    "INDPRO": ("Industrial Production Index", "monthly")
+    "DFF": ("Effective Federal Funds Rate", "daily")
 }
 
 
@@ -61,7 +55,7 @@ def download_fred_series(series_id: str, name: str, freq: str) -> pd.Series:
         return pd.DataFrame() # return empty DataFrame on error
     
 def main():
-    
+    setup_dirs()
     print("="*50)
     print("FRED Economic Data Download")
     print("="*50)
