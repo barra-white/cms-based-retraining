@@ -3,13 +3,9 @@ import pandas as pd
 
 # test for data stationarity using Augmented Dickey-Fuller and Kwiatkowski-Phillips-Schmidt-Shin tests
 
-df = pd.read_csv("data/processed/combined_data.csv",parse_dates=["Date"])
+df = pd.read_csv("data/processed/transformed_data.csv",parse_dates=["Date"])
 
-cols = [
-    "Date",
-    "SPY", "GLD", "UUP", "VIX", "OVX", "MOVE", "USO",
-    "T10Y2Y", "BAA10Y", "USEPUINDXD", "DGS10"
-]
+cols = df.columns
 
 print("Stationarity Tests:")
 print(f"{'Feature':<15} {'ADF p-value':<15} {'KPSS p-value':<15}")
