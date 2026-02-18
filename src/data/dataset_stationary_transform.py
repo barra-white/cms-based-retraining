@@ -25,9 +25,8 @@ out['Date'] = df["Date"]
 # returns: to allow for stationarity
 # log: to allow for multiplicative effects and to stabilize variance
 # log returns = log(price_t / price_{t-1})
-price_cols = ["SPY", "GLD", "UUP", "USO"]
-for col in price_cols:
-  out[f'{col}_lr'] = (np.log(df[col]) / df[col].shift(1))
+for col in ["SPY", "GLD", "UUP", "USO"]:
+  out[f'{col}_lr'] = np.log(df[col] / df[col].shift(1))
   
 
 # log for VIX
