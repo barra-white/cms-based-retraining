@@ -1,0 +1,5 @@
+Scenario,T,CI_Test,Precision,Recall,F1,TP,FP,FN
+Standard,1000,RobustParCorr,0.75,1.0,0.857,3,1,0
+Weak Signal,1000,RobustParCorr,1.0,1.0,1.0,3,0,0
+Short Window,250,RobustParCorr,0.75,1.0,0.857,3,1,0
+Short Window + Weak Signal,250,RobustParCorr,1.0,1.0,1.0,3,0,0
