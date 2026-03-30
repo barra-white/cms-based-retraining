@@ -8,6 +8,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 from sklearn.metrics import f1_score
 
+from river.drift import ADWIN
+
 from abc import ABC, abstractmethod
 
 # model configurations for grid search
@@ -296,3 +298,63 @@ class BaseRetrainer(ABC):
             })
             
         return pd.DataFrame(self.results)
+
+
+
+# ----- RETRAINING STRATEGIES ----- #
+class StaticRetrainer(BaseRetrainer):
+    '''
+    Baseline strategy: train once on first window, never retrain.
+    '''
+    def should_retrain(self, w, **kwargs):
+        return False
+    
+class FixedScheduleRetrainer(BaseRetrainer):
+    '''
+    Retrain at fixed intervals (e.g. every 5 windows), regardless of MSM signal.
+    '''
+    def __init__(self, *args, retrain_interval=5, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.retrain_interval = retrain_interval
+        
+    def should_retrain(self, w, **kwargs):
+        return (w % self.retrain_interval) == 0
+    
+class PerformanceRetrainer(BaseRetrainer):
+    '''
+    Retrain whenever performance drops below a certain threshold.
+    '''
+    def __init__(self, *args, f1_threshold=0.6, lookback_n=5, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.f1_threshold = f1_threshold
+        self.lookback_n = lookback_n
+        
+    def should_retrain(self, w, **kwargs):
+        # check if previous window's F1 dropped by a certain threshold
+        if len(self.results) < self.lookback_n:
+            return False # not enough history yet
+        
+        recent_f1 = [r['f1'] for r in self.results[-self.lookback_n:]]
+        baseline = np.mean(recent_f1[:-1]) # mean of all but most recent
+        current = recent_f1[-1] 
+        
+        return (baseline - current) > self.f1_threshold
+    
+class ADWINRetrainer(BaseRetrainer):
+    '''
+    Retrain whenever ADWIN detects a drift in the performance metric.
+    '''
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.adwin = ADWIN()
+        
+    def run(self, all_graphs):
+        self.adwin = ADWIN() # reset ADWIN state for new run
+        return super().run(all_graphs)
+    
+    def should_retrain(self, w, **kwargs):
+        if not self.results:
+            return False # no performance data yet
+        self.adwin.update(self.results[-1]['f1'])
+        return self.adwin.change_detected
+    
