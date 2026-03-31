@@ -43,8 +43,9 @@ def align_data(yf_df, fred_df):
     fred_aligned = fred_aligned.ffill().bfill() # ensure no missing values after alignment
     
     combined_df = pd.concat([yf_df, fred_aligned], axis=1)
-    
     combined_df.to_csv(OUTPUT_FILE, index=True)
+    print(f"Combined data shape: {combined_df.shape[0]} rows, {combined_df.shape[1]} columns")
+    print(f"Date range: {combined_df.index.min()} to {combined_df.index.max()}")
     
     
 def main():

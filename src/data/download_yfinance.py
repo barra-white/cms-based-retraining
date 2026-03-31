@@ -141,14 +141,6 @@ def download_all(ticker_dict: dict[str, dict[str, str]], start_date: str, end_da
     else:
         print("\nAll tickers processed successfully with extracted features.")
         
-        
-    # debugging: check whats in all_features
-    if not all_features:
-        print("\nChecking: all_features contents")
-        for k, v in list(all_features.items())[:5]: # show first 5 items
-            print(f"\t{k}: type={type(v)}, length={len(v) if hasattr(v, '__len__') else 'N/A'}")
-    combined = pd.DataFrame(all_features)
-    
     
     try:
         print("\nCreating combined DataFrame...")
