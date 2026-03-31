@@ -353,12 +353,13 @@ class ADWINRetrainer(BaseRetrainer):
     '''
     Retrain whenever ADWIN detects a drift in the performance metric.
     '''
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, delta=0.002, **kwargs):
         super().__init__(*args, **kwargs)
-        self.adwin = ADWIN()
+        self.delta = delta
+        self.adwin = ADWIN(delta=delta)
         
     def run(self, all_graphs):
-        self.adwin = ADWIN() # reset ADWIN state for new run
+        self.adwin = ADWIN(delta=self.delta) # reset ADWIN state for new run
         return super().run(all_graphs)
     
     def should_retrain(self, w, **kwargs):
