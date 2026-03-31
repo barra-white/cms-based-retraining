@@ -178,8 +178,9 @@ def edge_persistence_analysis(all_graphs):
         })
 
     persistence_df = pd.DataFrame(persistence_rows)
-    persistence_df.to_csv('results/edge_persistence.csv', index=False)
-    print(f'\n    Saved: results/edge_persistence.csv')
+    os.makedirs('results/causal_discovery', exist_ok=True)
+    persistence_df.to_csv('results/causal_discovery/edge_persistence.csv', index=False)
+    print(f'\n    Saved: results/causal_discovery/edge_persistence.csv')
 
     print(f'\n    Edges directed toward SPY_lr:')
     spy_df = persistence_df[
@@ -198,7 +199,7 @@ def edge_persistence_analysis(all_graphs):
 
 if __name__ == '__main__':
     # Resume from a previous manual-loop run or batch runner if available.
-    # Note: run_sliding_window_of does not write this file — if it crashes,
+    # run_sliding_window_of does not write this file — if it crashes,
     # all progress is lost. Revert to a manual loop if runtime is > 60 min.
     progress_file = 'results/causal_graphs_progress.pkl'
     if os.path.exists(progress_file):
@@ -218,15 +219,16 @@ if __name__ == '__main__':
                 'runtime_s':   0
             })
     else:
-        # CHANGED: sensitivity check removed — go straight to rolling window
+        # sensitivity check removed — go straight to rolling window
         all_graphs, window_rows = rolling_window_discovery()
 
     with open('results/causal_graphs.pkl', 'wb') as f:
         pickle.dump(all_graphs, f)
     print(f'    Causal graphs saved: results/causal_graphs.pkl')
 
+    os.makedirs('results/causal_discovery', exist_ok=True)
     pd.DataFrame(window_rows).to_csv(
-        'results/causal_discovery_summary.csv', index=False)
-    print(f'    Summary saved: results/causal_discovery_summary.csv')
+        'results/causal_discovery/causal_discovery_summary.csv', index=False)
+    print(f'    Summary saved: results/causal_discovery/causal_discovery_summary.csv')
 
     edge_persistence_analysis(all_graphs)

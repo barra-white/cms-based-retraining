@@ -132,7 +132,8 @@ def arch_effect_testing():
             'has_arch': flag
         })
         
-    pd.DataFrame(arch_rows).to_csv("results/arch_effects.csv", index=False)
+    os.makedirs("results/validation", exist_ok=True)
+    pd.DataFrame(arch_rows).to_csv("results/validation/arch_effects.csv", index=False)
 
     if arch_vars:
         print(f'\tARCH effects detected in: {arch_vars}')
@@ -150,8 +151,8 @@ def multicollinearity_testing():
     corr_df = pd.DataFrame(data, columns=var_names).corr()
     
     # save results
-    corr_df.to_csv("results/correlation_matrix.csv", index=True)
-
+    os.makedirs("results/validation", exist_ok=True)
+    corr_df.to_csv("results/validation/correlation_matrix.csv", index=True)
     print("  Full correlation matrix:")
     print("  " + corr_df.round(3).to_string().replace('\n', '\n  '))
 
@@ -341,14 +342,15 @@ def toy_model_validation():
             'FN'        : len(fn)
         })
 
-    pd.DataFrame(all_rows).to_csv("results/toy_validation.csv", index=False)
+    os.makedirs("results/validation", exist_ok=True)
+    pd.DataFrame(all_rows).to_csv("results/validation/toy_validation.csv", index=False)
 
 if __name__ == "__main__":
-    #tau_max_selection()
+    tau_max_selection()
     # based on the graph we will be using RobustParCorr with tau_max=[3, 5, 7]
     # 3: minimum covering all robust signals
     # 5: signals + buffer
     # 7: upper bound to confirm nothing emerges from longer lags
-    #arch_effect_testing()
-    #multicollinearity_testing()
+    arch_effect_testing()
+    multicollinearity_testing()
     toy_model_validation()
