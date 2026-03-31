@@ -222,9 +222,9 @@ if __name__ == '__main__':
         # sensitivity check removed — go straight to rolling window
         all_graphs, window_rows = rolling_window_discovery()
 
-    with open('results/causal_graphs.pkl', 'wb') as f:
+    with open('data/causal_graphs.pkl', 'wb') as f:
         pickle.dump(all_graphs, f)
-    print(f'    Causal graphs saved: results/causal_graphs.pkl')
+    print(f'    Causal graphs saved: data/causal_graphs.pkl')
 
     os.makedirs('results/causal_discovery', exist_ok=True)
     pd.DataFrame(window_rows).to_csv(
