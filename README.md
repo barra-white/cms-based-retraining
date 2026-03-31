@@ -118,7 +118,7 @@ python src/causal_discovery/pre_msm_validation.py
 Runs ARCH effect testing, multicollinearity checks and toy model validation to confirm PCMCI+ is appropriate for this dataset.
 Writes to: `results/validation/`
 
-### Step 6 — Causal graph generation *(slow: 30–90 min)*
+### Step 6 — Causal graph generation *(slow)*
 
 ```bash
 python src/causal_discovery/generate_causal_graphs.py
