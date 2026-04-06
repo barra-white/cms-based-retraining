@@ -1,5 +1,6 @@
 import os
 import pickle
+import traceback
 
 import numpy as np
 import pandas as pd
@@ -23,28 +24,32 @@ RUN_SENSITIVITY = True
 # ----- SENSITIVITY CONFIGS -----
 # Sensitivity retrainer configurations (grid of parameters)
 # 1) MSM thresholds
-TAU_1_VALUES = [0.5, 0.6, 0.7] 
-TAU_2_VALUES = [0.45, 0.55, 0.65] 
+# based off of msm validation script
+TAU_1_VALUES = [0.8, 0.83, 0.88] 
+TAU_2_VALUES = [0.72, 0.75, 0.78] 
 
 # 2) MSM lookback (how many windows to compute MSM)
 LOOKBACK = [3, 4, 6]
 
 # 3) Performance drop thresholds
-PERFORMANCE_THRESHOLDS = [0.05, 0.1, 0.15] # 5%, 10%, 15% drop in performance triggers retrain
+PERFORMANCE_THRESHOLDS = [0.03, 0.05, 0.1, 0.15, 0.2] # 3%, 5%, 10%, 15%, 20% drop in performance triggers retrain
 
 # 4) Performance lookback (how many windows to compute performance drop)
 PERFORMANCE_LOOKBACK = [3, 4, 6]
 
 # 5) ADWIN delta values (sensitivity to change)
-ADWIN_DELTAS = [0.001, 0.002, 0.005]
+ADWIN_DELTAS = [0.01, 0.05, 0.1]
 
 # 6) Fixed schedule intervals (in months)
 FIXED_INTERVALS = [3, 6, 9, 12]
 
 # default msm config (RUN_SENSITIVITY = False)
-MSM_DEFAULT = ("msm_default", MSMRetrainer, {"tau_1": 0.6, "tau_2": 0.55, "lookback": 4})
+MSM_DEFAULT = ("msm_default", MSMRetrainer, {"tau_1": 0.83, "tau_2": 0.75, "lookback": 4})
 
 
+
+# list of all models to be tested
+MODEL_TYPES = ['xgboost', 'lr', 'rf']
 
 # ----- CONFIG BUILDERS -----
 # static
@@ -63,26 +68,29 @@ def build_performance_configs():
     configs = []
     for drop in PERFORMANCE_THRESHOLDS:
         for lookback in PERFORMANCE_LOOKBACK:
-            name = f'perf_drop{drop}_lookback{lookback}'
-            configs.append((name, PerformanceRetrainer, {"drop_threshold": drop, "lookback": lookback}))
+            name = f'perf_drop_{drop}_lookback_{lookback}'
+            configs.append((name, PerformanceRetrainer, {"drop_threshold": drop, "lookback_n": lookback}))
     return configs
 
 # ADWIN-based
 def build_adwin_configs():
     return [
-        (f'adwin_delta{delta}', ADWINRetrainer, {"delta": delta})
+        (f'adwin_delta_{delta}', ADWINRetrainer, {"delta": delta})
         for delta in ADWIN_DELTAS
     ]
     
 # MSM-based
 def build_msm_configs():
     configs = []
+    MIN_TAU_DIFF = 0.04 # ensure tau_1 and tau_2 differ by at least this much to avoid trivial configs
     for tau_1 in TAU_1_VALUES:
         for tau_2 in TAU_2_VALUES:
             if tau_2 >= tau_1:
                 continue # skip invalid configs where tau_2 >= tau_1
+            if abs(tau_1 - tau_2) < MIN_TAU_DIFF:
+                continue # skip configs where tau_1 and tau_2 are too close
             for lookback in LOOKBACK:
-                name = f'msm_tau1{tau_1}_tau2{tau_2}_lookback{lookback}'
+                name = f'msm_tau1_{tau_1}_tau2_{tau_2}_lookback_{lookback}'
                 configs.append((name, MSMRetrainer, {"tau_1": tau_1, "tau_2": tau_2, "lookback": lookback}))
     return configs
 
@@ -98,14 +106,20 @@ def run_experiment(name, cls, kwargs, base_args, all_graphs):
     
     # tag results with retrainer name for later analysis
     results['retrainer'] = name
+    # tag model type for later analysis
+    results['model_type'] = base_args['model_type']
     
     # save csv immideiately to avoid losing results if experiment crashes later
-    output_file = f"results/experiments/{name}_results.csv"
+    output_file = f"results/experiments/{base_args['model_type']}_{name}_results.csv"
     results.to_csv(output_file, index=False)
     
-    print(f'\n\tmean f1   : {results["f1"].mean():.4f}')
-    print(f'\tmean acc   : {results["accuracy"].mean():.4f}')
-    print(f'\tretrains   : {results["retrain"].sum()}')
+    print(f'\n\tmean f1    : {results["f1"].mean():.4f}')
+    print(f'\tdirectional acc : {results["directional_acc"].mean():.4f}')
+    print(f'\tretrains    : {results["retrain_triggered"].sum()}')
+    print(f'\tsignals     : {results["signal_fired"].sum()}')
+    print(f'\tcooldowns   : {results["cooldown_active"].sum()}')
+    print(f'\tretrain rate: {results["retrain_triggered"].mean():.4%}')
+    print(f'\twindows     : {len(results)}')
     print(f'saved results to: {output_file}')
     return results
 
@@ -114,9 +128,10 @@ def run_experiment(name, cls, kwargs, base_args, all_graphs):
 # ----- SUMMARY PRINTING -----
 def print_summary(combined):
     summary = (
-        combined.groupby('retrainer')
+        combined.groupby(['model_type', 'retrainer'])
         .agg(
             mean_f1=('f1', 'mean'),
+            mean_directional_acc=('directional_acc', 'mean'),
             std_f1=('f1', 'std'),
             retrains=('retrain_triggered', 'sum'),
             windows=('f1', 'count')
@@ -144,7 +159,7 @@ def main():
     print(f'Graph windows: {len(all_graphs)}')
     
     # base args: same for all retrainers
-    base_args = dict(
+    base_args_temp = dict(
         df=df,
         feature_cols=feature_cols,
         target='SPY_lr',
@@ -174,14 +189,21 @@ def main():
     
     print('Starting experiments...')
     exp_num = 1
-    total_exps = len(configs)
+    total_exps = len(configs) * len(MODEL_TYPES)
     
-    for name, cls, kwargs in configs:
-        print(f'\n=== Experiment {exp_num}/{total_exps}: {name} ===')
-        results = run_experiment(name, cls, kwargs, base_args, all_graphs)
-        all_results.append(results)
-        exp_num += 1
+    for model_type in MODEL_TYPES:
+        base_args = {**base_args_temp, "model_type": model_type}
+        for name, cls, kwargs in configs:
+            print(f'\n=== Experiment {exp_num}/{total_exps}: {name} ===')
+            try:
+                results = run_experiment(name, cls, kwargs, base_args, all_graphs)
+                all_results.append(results)
+            except Exception as e:
+                print(f'\nError occurred while running experiment {name}: {e}')
+                traceback.print_exc()
+            exp_num += 1
         
+    
     combined = pd.concat(all_results, ignore_index=True)
     combined.to_csv("results/experiments/all_results.csv", index=False)
     print('All experiments completed. Combined results saved to results/experiments/all_results.csv')
