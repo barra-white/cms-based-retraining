@@ -167,9 +167,6 @@ def compute_per_class_f1(df):
     then compute per-class F1. Low F1 on any single class indicates class
     imbalance caused by stale bin edges not being refreshed often enough.
     Classes: 0 = down, 1 = neutral, 2 = up.
-
-    FIX: replaced iterrows() with vectorised list concatenation — ~100x faster
-    on large result sets.
     '''
     CLASS_NAMES = {0: 'down', 1: 'neutral', 2: 'up'}
     records = []
@@ -314,10 +311,6 @@ def compute_retrain_efficiency(df, lookback=3):
 
     in_stress_window flags whether the retrain fell inside a known stress
     event — lets you compare efficiency of stress vs. non-stress retrains.
-
-    FIX: switched from .loc (label-based) to .iloc (position-based) for
-    pre/post window slicing — .loc only worked because reset_index happened
-    to make labels equal to positions.
     '''
     records = []
     for (model, retrainer), group in df.groupby(['model_type', 'retrainer']):
@@ -470,9 +463,6 @@ def compute_causal_feature_usage(df):
     High selection_rate → structurally stable causal predictor of SPY.
     Low selection_rate  → regime-specific feature, appearing only during
     particular market conditions (e.g. VIX during stress periods).
-
-    FIX: groupby string key instead of single-element list to avoid
-    the fragile (model,) tuple unpacking pattern.
     '''
     causal = df[(df['exp_type'] == 'causal') & df['active_features'].notna()].copy()
     if causal.empty:
@@ -525,9 +515,6 @@ def compute_friedman_ranks(df):
     This is the standard ML benchmarking methodology (Demsar 2006) and
     is the correct complement to the pairwise Wilcoxon tests in
     significance_test.py — it controls family-wise error rate.
-
-    FIX: dropna() now logs how many rows were dropped before being applied,
-    so silent window loss from strategies with incomplete runs is visible.
 
     Outputs:
         friedman_ranks.csv     — mean rank per (model_type, retrainer)
@@ -760,8 +747,7 @@ def main():
     if 'stress_calm_ratio' in regime_rate.columns:
         print('\n=== Top 10 Strategies by Stress/Calm Retrain Ratio ===')
         print(
-            regime_rate[['model_type', 'retrainer', 'exp_type',
-                          'retrain_rate_stress', 'retrain_rate_calm', 'stress_calm_ratio']]
+            regime_rate[['model_type', 'retrainer', 'exp_type', 'retrain_rate_stress', 'retrain_rate_calm', 'stress_calm_ratio']]
             .head(10).to_string(index=False)
         )
 

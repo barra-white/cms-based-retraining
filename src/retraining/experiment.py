@@ -228,11 +228,9 @@ def main():
     
     # build retrainer configs
     configs = []
-
-    configs += build_adwin_configs()
     
     if RUN_SENSITIVITY:
-        configs  = build_static_config()
+        configs += build_static_config()
         configs += build_fixed_schedule_configs()
         configs += build_performance_configs()
         configs += build_adwin_configs()
