@@ -42,7 +42,7 @@ PERFORMANCE_THRESHOLDS = [0.03, 0.05, 0.1, 0.15, 0.2] # 3%, 5%, 10%, 15%, 20% dr
 PERFORMANCE_LOOKBACK = [3, 4, 6]
 
 # 5) ADWIN delta values (sensitivity to change)
-ADWIN_DELTAS = [0.01, 0.05, 0.1]
+ADWIN_DELTAS = [0.002, 0.005, 0.01, 0.05, 0.1]
 
 # 6) Fixed schedule intervals (in months)
 FIXED_INTERVALS = [3, 6, 9, 12]

@@ -40,7 +40,7 @@ STRESS_EVENTS = {
     'covid_crash':    pd.Timestamp('2020-02-20'),
     'fed_hikes_2022': pd.Timestamp('2022-03-16'),
 }
-STRESS_WINDOW_DAYS = 63  # ±3 calendar months = one financial quarter
+STRESS_WINDOW_DAYS = 120  # ±3 calendar months = one financial quarter
 
 
 # ----- EXPERIMENT TYPE PREFIXES ----- #
@@ -94,13 +94,15 @@ def load_results(path='results/experiments/all_results.csv'):
         print(f'Warning: using partial results from {partial_path}')
         df = pd.read_csv(partial_path, parse_dates=['date_start', 'date_end'])
     else:
-        # walk results/experiments/<model>/<retrainer_type>/*_results.csv
-        parts  = glob.glob('results/experiments/*/*_results.csv')
-        parts += glob.glob('results/experiments/*/*/*_results.csv')
+        parts  = glob.glob('results/experiments/*/*/*_results.csv')
+        # explicitly exclude both aggregate files — all_results_partial.csv is a
+        # crash-recovery artefact and may contain only a subset of models
+        parts  = [p for p in parts if os.path.basename(p) not in
+                ('all_results.csv', 'all_results_partial.csv')]
         if not parts:
             raise FileNotFoundError(
-                f"No results at '{path}' and no per-experiment CSVs found under "
-                "results/experiments/. Run experiment.py first."
+                f"No results at '{path}' and no per-experiment CSVs found. "
+                "Run experiment.py first."
             )
         df = pd.concat(
             [pd.read_csv(p, parse_dates=['date_start', 'date_end']) for p in parts],
@@ -558,6 +560,10 @@ def compute_regime_retrain_rate(df):
 
     retrain_rate_stress / retrain_rate_calm > 1 means the strategy is
     concentrating retrains during the periods that matter most.
+
+    likely_inverted flags any strategy where stress_calm_ratio < 1.0,
+    meaning it retrains more during calm than stress — a signal of
+    misconfiguration (e.g. the SPY-MSM empty-graph bug).
     '''
     data = df.copy()
     data['regime'] = data['date_start'].apply(
@@ -567,8 +573,8 @@ def compute_regime_retrain_rate(df):
     rate = (
         data.groupby(['model_type', 'retrainer', 'exp_type', 'regime'])
         .agg(
-            retrains = ('retrain_triggered', 'sum'),
-            windows  = ('retrain_triggered', 'count'),
+            retrains=('retrain_triggered', 'sum'),
+            windows =('retrain_triggered', 'count'),
         )
         .reset_index()
     )
@@ -581,7 +587,6 @@ def compute_regime_retrain_rate(df):
     ).reset_index()
     pivot.columns.name = None
 
-    # rename for clarity if both regimes exist in the data
     rename = {}
     if 'stress' in pivot.columns:
         rename['stress'] = 'retrain_rate_stress'
@@ -593,6 +598,9 @@ def compute_regime_retrain_rate(df):
         pivot['stress_calm_ratio'] = (
             pivot['retrain_rate_stress'] / pivot['retrain_rate_calm'].replace(0, np.nan)
         ).round(4)
+
+        # flag strategies retraining more during calm than stress
+        pivot['likely_inverted'] = pivot['stress_calm_ratio'] < 1.0
 
     return pivot.sort_values(
         ['model_type', 'stress_calm_ratio'] if 'stress_calm_ratio' in pivot.columns

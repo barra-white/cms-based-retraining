@@ -670,7 +670,7 @@ class SPYFocusedMSMRetrainer(MSMRetrainer):
         if not all_edges:
             # SPY having no incoming edges is a valid sparse-graph state,
             # not a signal of causal instability.
-            return 1.0, {}
+            return 0.0, {}
 
         edge_scores = {
             e: sum(1 for g in recent_windows if e in g['edges']) / n
