@@ -206,6 +206,7 @@ class BaseRetrainer(ABC):
         return config['class'](**all_params)
     
     
+    
     # ----- IMPUTATION ----- #
     def _impute(self, X: np.ndarray) -> np.ndarray:
         """Forward-fill then zero-fill NaN in a 2-D feature matrix."""
@@ -284,6 +285,7 @@ class BaseRetrainer(ABC):
         pass
     
     
+    
     # ----- TEMPLATE METHOD HOOKS ----- #
     def _reset_run_state(self):
         """Override to reset any subclass-specific state at the start of run()."""
@@ -309,6 +311,7 @@ class BaseRetrainer(ABC):
         pass
     
     
+    
     # ----- MAIN RETRAINING LOOP ----- #
     def run(self, all_graphs):
         '''
@@ -321,9 +324,7 @@ class BaseRetrainer(ABC):
         self.bin_edges           = None
         self._reset_run_state()
         model              = None
-        model_feature_cols = self.feature_cols  # BUG A FIX: tracks what the live model was trained on
-                                                # X_test must always match this, not the current window's
-                                                # candidate features — they can diverge without a retrain
+        model_feature_cols = self.feature_cols
 
         for w, g in enumerate(all_graphs):
             train_start = g['train_start_idx']
@@ -368,8 +369,8 @@ class BaseRetrainer(ABC):
                     model_feature_cols = candidate_cols  # model now knows the new feature set
                     self._post_retrain_hook()
 
-            # BUG A FIX: X_test uses model_feature_cols (what the live model was trained on),
-            # NOT candidate_cols (current window's graph-derived feature set).
+
+
             # These are identical for all retrainers except CausalFeatureRetrainer,
             # where the graph — and thus candidate_cols — can change every window.
             X_test = self._impute(self.df[model_feature_cols].iloc[test_start:test_end].values)
@@ -395,10 +396,6 @@ class BaseRetrainer(ABC):
 
             result.update(self._extra_result_fields(w, g, triggered, context))
 
-            # BUG B FIX: fill optional subclass columns with None so every retrainer
-            # produces the same schema. Without this, StaticRetrainer rows have 13 cols
-            # and MSMRetrainer rows have 15 — appending them to the same partial CSV
-            # causes a pandas ParserError on read-back.
             _OPTIONAL_FIELDS = {'graph_msm': None, 'unstable_edges': None, 'active_features': None}
             for k, v in _OPTIONAL_FIELDS.items():
                 result.setdefault(k, v)
@@ -481,7 +478,7 @@ class RandomRetrainer(BaseRetrainer):
         super().__init__(*args, **kwargs)
         self.p    = p
         self.seed = seed
-        self.rng  = np.random.default_rng(seed)   # Fix 8: local seeded RNG
+        self.rng  = np.random.default_rng(seed)   # local seeded RNG
 
     def _reset_run_state(self):
         self.rng = np.random.default_rng(self.seed)  # reset to same seed each run
@@ -616,7 +613,7 @@ class MSMRetrainer(BaseRetrainer):
                 self._provisional_edge_scores = {}
                 return False
 
-        return False  # FIX: was implicit None
+        return False 
     
     def _reset_run_state(self):
         self._provisional_flag        = False
@@ -634,7 +631,7 @@ class MSMRetrainer(BaseRetrainer):
         edge_scores = context.get('edge_scores', {})
         return {
             'graph_msm':     round(curr_msm, 4),
-            'unstable_edges': _to_json({          # Fix 13
+            'unstable_edges': _to_json({         
                 str(e): round(s, 3)
                 for e, s in edge_scores.items()
                 if s < self.tau_1
@@ -671,7 +668,6 @@ class SPYFocusedMSMRetrainer(MSMRetrainer):
             all_edges |= {e for e in g['edges'] if e[1] == self.spy_idx}
 
         if not all_edges:
-            # Fix 3: return 1.0 (fully stable) not 0.0 (fully unstable).
             # SPY having no incoming edges is a valid sparse-graph state,
             # not a signal of causal instability.
             return 1.0, {}
@@ -697,7 +693,7 @@ class MSMTimeoutRetrainer(MSMRetrainer):
 
     def _reset_run_state(self):
         super()._reset_run_state()
-        self._provisional_window_count = 0   # Fix 1: was never reset
+        self._provisional_window_count = 0   # reset
 
     def should_retrain(self, w, all_graphs=None, curr_msm=None, **kwargs):
         if w < self.lookback or all_graphs is None:
@@ -738,19 +734,19 @@ class CausalFeatureRetrainer(MSMRetrainer):
 
     def _get_feature_cols_for_window(self, g):
         """Select only SPY-parent features for this window.
-        Reset best_params if the feature set changes (Fix 7)."""
+        Reset best_params if the feature set changes"""
         active_indices = self._get_spy_parent_indices(g)
         new_active     = [self.all_features[idx] for idx in active_indices]
 
         if new_active != self._active_features:
-            self.best_params = None   # Fix 7: warm grid is invalid for a different feature set
+            self.best_params = None
 
         self._active_features = new_active
         return self._active_features
 
     def _extra_result_fields(self, w, g, triggered, context) -> dict:
         fields = super()._extra_result_fields(w, g, triggered, context)
-        fields['active_features'] = _to_json(self._active_features)  # Fix 13
+        fields['active_features'] = _to_json(self._active_features)
         return fields
 
     def _get_spy_parent_indices(self, g):
