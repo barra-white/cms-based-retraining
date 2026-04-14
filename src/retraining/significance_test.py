@@ -20,7 +20,7 @@ def run_significance_tests(df, model_type='xgboost', alpha=0.05):
         values='f1'
     )
     
-    pivot.dropna()
+    pivot = pivot.dropna()
     retrainers = list(pivot.columns)
     results = []
     
@@ -69,3 +69,5 @@ if __name__ == "__main__":
         print(tests[['retrainer_1', 'retrainer_2', 'mean_diff', 'p_value', 'significant_two_sided']].to_string(index=False))
     
     pd.concat(all_tests).to_csv('results/analysis/significance_tests.csv', index=False)
+    
+    
