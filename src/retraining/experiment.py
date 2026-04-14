@@ -10,7 +10,11 @@ from retrainers import(
     FixedScheduleRetrainer,
     PerformanceRetrainer,
     ADWINRetrainer,
-    MSMRetrainer
+    RandomRetrainer,
+    MSMRetrainer,
+    SPYFocusedMSMRetrainer,
+    MSMTimeoutRetrainer,
+    CausalFeatureRetrainer
 )
 
 # ----- RUN CONFIG -----
@@ -78,7 +82,31 @@ def build_adwin_configs():
         (f'adwin_delta_{delta}', ADWINRetrainer, {"delta": delta})
         for delta in ADWIN_DELTAS
     ]
-    
+def build_random_configs():
+    return [('random', RandomRetrainer, {})]
+
+def build_spy_msm_configs():
+    configs = []
+    for tau_1 in TAU_1_VALUES:
+        for tau_2 in TAU_2_VALUES:
+            if tau_2 >= tau_1 or abs(tau_1 - tau_2) < 0.04:
+                continue
+            for lookback in LOOKBACK:
+                name = f'spy_msm_tau_1_{tau_1}_tau_2_{tau_2}_lb_{lookback}' 
+                configs.append((name, SPYFocusedMSMRetrainer, {'tau_1': tau_1, 'tau_2': tau_2, 'lookback': lookback}))
+    return configs
+
+def build_timeout_msm_configs():
+    configs = []
+    for tau_1 in TAU_1_VALUES:
+        for tau_2 in TAU_2_VALUES:
+            if tau_2 >= tau_1 or abs(tau_1 - tau_2) < 0.04:
+                continue
+            for lookback in LOOKBACK:
+                name = f'timeout_msm_tau_1_{tau_1}_tau_2_{tau_2}_lb_{lookback}'
+                configs.append((name, MSMTimeoutRetrainer, {'tau_1': tau_1, 'tau_2': tau_2, 'lookback': lookback}))
+    return configs
+
 # MSM-based
 def build_msm_configs():
     configs = []
@@ -90,14 +118,43 @@ def build_msm_configs():
             if abs(tau_1 - tau_2) < MIN_TAU_DIFF:
                 continue # skip configs where tau_1 and tau_2 are too close
             for lookback in LOOKBACK:
-                name = f'msm_tau1_{tau_1}_tau2_{tau_2}_lookback_{lookback}'
+                name = f'msm_tau_1_{tau_1}_tau_2_{tau_2}_lb_{lookback}'       # ← 'lookback_' → 'lb_' (consistency)
                 configs.append((name, MSMRetrainer, {"tau_1": tau_1, "tau_2": tau_2, "lookback": lookback}))
     return configs
 
 
 
 # ----- SINGLE EXPERIMENT RUNNER -----
+def get_experiment_type(name: str) -> str:
+    if name.startswith('spy_msm'):
+        return 'spy_msm'
+    if name.startswith('timeout_msm'):
+        return 'timeout_msm'
+    if name.startswith('msm'):
+        return 'msm'
+    if name.startswith('causal'):
+        return 'causal'
+    if name.startswith('fixed'):
+        return 'fixed'
+    if name.startswith('perf'):
+        return 'performance'
+    if name.startswith('adwin'):
+        return 'adwin'
+    if name.startswith('random'):
+        return 'random'
+    if name.startswith('static'):
+        return 'static'
+    return 'other'
+
 def run_experiment(name, cls, kwargs, base_args, all_graphs):
+    model_type      = base_args['model_type']
+    experiment_type = get_experiment_type(name)
+    output_dir      = f"results/experiments/{model_type}/{experiment_type}"
+    output_file     = f"{output_dir}/{name}_results.csv"
+    os.makedirs(output_dir, exist_ok=True)
+    if os.path.exists(output_file):
+        print(f'\nResults for {name} already exist at {output_file}. Loading existing results...')
+        return pd.read_csv(output_file)
     print(f'\nRunning: {name}')
     print(f'\tConfig: {kwargs}')
     
@@ -110,7 +167,6 @@ def run_experiment(name, cls, kwargs, base_args, all_graphs):
     results['model_type'] = base_args['model_type']
     
     # save csv immideiately to avoid losing results if experiment crashes later
-    output_file = f"results/experiments/{base_args['model_type']}_{name}_results.csv"
     results.to_csv(output_file, index=False)
     
     print(f'\n\tmean f1    : {results["f1"].mean():.4f}')
@@ -172,19 +228,35 @@ def main():
     
     # build retrainer configs
     configs = []
-    configs += build_static_config()
-    configs += build_fixed_schedule_configs()
-    configs += build_performance_configs()
+
     configs += build_adwin_configs()
     
     if RUN_SENSITIVITY:
+        configs  = build_static_config()
+        configs += build_fixed_schedule_configs()
+        configs += build_performance_configs()
+        configs += build_adwin_configs()
+        configs += build_random_configs()
         configs += build_msm_configs()
-        print(f'Running full sensitivity grid with {len(configs)} retrainer configurations...')
+        configs += build_spy_msm_configs()
+        configs += build_timeout_msm_configs()
+        # Note: CausalFeatureRetrainer needs feature_cols — add after feature_cols is loaded
+        spy_idx = feature_cols.index('SPYlr') if 'SPYlr' in feature_cols else 10
+        for tau1 in TAU_1_VALUES:
+            for tau2 in TAU_2_VALUES:
+                if tau2 >= tau1 or abs(tau1 - tau2) < 0.04: continue
+                for lookback in LOOKBACK:
+                    configs.append((f'causal_tau_1_{tau1}_tau_2_{tau2}_lb_{lookback}', 
+                    CausalFeatureRetrainer,
+                    {'tau_1': tau1, 'tau_2': tau2, 'lookback': lookback,  'spy_idx': spy_idx, 'all_features': feature_cols}))
     else:
         configs += [MSM_DEFAULT]
         print(f'DEV MODE: Running default configurations for each retrainer with {len(configs)} retrainer configurations...')
         
     os.makedirs("results/experiments", exist_ok=True)
+    os.makedirs("results/experiments/xgboost", exist_ok=True)
+    os.makedirs("results/experiments/lr", exist_ok=True)
+    os.makedirs("results/experiments/rf", exist_ok=True)
     all_results = []
     
     print('Starting experiments...')
@@ -198,6 +270,7 @@ def main():
             try:
                 results = run_experiment(name, cls, kwargs, base_args, all_graphs)
                 all_results.append(results)
+                pd.concat(all_results, ignore_index=True).to_csv("results/experiments/all_results_partial.csv", index=False)
             except Exception as e:
                 print(f'\nError occurred while running experiment {name}: {e}')
                 traceback.print_exc()

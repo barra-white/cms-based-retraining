@@ -1,15 +1,13 @@
+import json
 import numpy as np
 import pandas as pd
 
 from xgboost import XGBClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 from sklearn.metrics import f1_score, accuracy_score
-
 from river.drift import ADWIN
-
 from abc import ABC, abstractmethod
 
 # model configurations for grid search
@@ -91,6 +89,22 @@ MODEL_CONFIGS = {
 }
 
 
+# ----- ANALYSIS METRICS ----- 
+class NumpyEncoder(json.JSONEncoder):
+    """JSON encoder that handles numpy scalar and array types."""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+def _to_json(obj) -> str:
+    return json.dumps(obj, cls=NumpyEncoder)
+
+
 
 class BaseRetrainer(ABC):
     '''
@@ -145,16 +159,32 @@ class BaseRetrainer(ABC):
     
     # ----- BINNING ----- #
     def freeze_bin_edges(self, train_vals):
+        # Strip NaN before sorting — np.sort pushes NaN to the tail
+        # which causes boundary indices to land on NaN values
+        train_vals = train_vals[~np.isnan(train_vals)]
+
+        if len(train_vals) == 0:
+            raise ValueError("freeze_bin_edges: no valid (non-NaN) target values in training window.")
+
         n = len(train_vals)
         sorted_vals = np.sort(train_vals)
 
-        # Place each boundary at the MIDPOINT between the two sorted values
-        # that straddle the quantile boundary — guarantees no ties on the edge
         boundary_idxs = [int(n * k / self.n_bins) for k in range(1, self.n_bins)]
         interior_edges = [
             (sorted_vals[i - 1] + sorted_vals[i]) / 2.0
             for i in boundary_idxs
         ]
+
+        # Deduplicate edges — duplicate-heavy series (many near-zero returns)
+        # can produce identical midpoints, collapsing bins into one
+        interior_edges = sorted(set(interior_edges))
+
+        if len(interior_edges) < self.n_bins - 1:
+            # Fallback: derive edges from unique values via evenly spaced quantiles
+            unique_vals = np.unique(sorted_vals)
+            quantiles = np.linspace(0, 1, self.n_bins + 1)[1:-1]
+            interior_edges = sorted(set(np.quantile(unique_vals, quantiles).tolist()))
+
         self.bin_edges = np.array([-np.inf] + interior_edges + [np.inf])
         
     def apply_bins(self, vals):
@@ -174,6 +204,17 @@ class BaseRetrainer(ABC):
         elif self.best_params:
             all_params.update(self.best_params)
         return config['class'](**all_params)
+    
+    
+    # ----- IMPUTATION ----- #
+    def _impute(self, X: np.ndarray) -> np.ndarray:
+        """Forward-fill then zero-fill NaN in a 2-D feature matrix."""
+        return pd.DataFrame(X).ffill().fillna(0).values
+
+    def _impute_target(self, y: np.ndarray) -> np.ndarray:
+        """Forward-fill then zero-fill NaN in a 1-D target vector.
+        Keeps the target array aligned with X — no rows are dropped."""
+        return pd.Series(y).ffill().fillna(0).values
     
     
     
@@ -243,21 +284,47 @@ class BaseRetrainer(ABC):
         pass
     
     
+    # ----- TEMPLATE METHOD HOOKS ----- #
+    def _reset_run_state(self):
+        """Override to reset any subclass-specific state at the start of run()."""
+        pass
+
+    def _get_feature_cols_for_window(self, g):
+        """Override to return a different feature list per window (e.g. causal selection).
+        Default: use self.feature_cols for all windows."""
+        return self.feature_cols
+
+    def _compute_window_context(self, w, g, all_graphs):
+        """Override to compute extra per-window data (e.g. MSM score).
+        Returns a dict; its contents are spread into should_retrain() and
+        passed to _extra_result_fields()."""
+        return {}
+
+    def _extra_result_fields(self, w, g, triggered, context: dict) -> dict:
+        """Override to add subclass-specific fields to the results row."""
+        return {}
+
+    def _post_retrain_hook(self):
+        """Override for cleanup that must run immediately after a retrain fires."""
+        pass
+    
     
     # ----- MAIN RETRAINING LOOP ----- #
     def run(self, all_graphs):
         '''
         Rolling retraining loop over all_graphs.
+        Subclasses customise behaviour via hook methods — do NOT override run() directly.
         '''
-        
-        # state reset for new run
-        self.results = []
+        self.results             = []
         self.last_retrain_window = -999
-        self.best_params = None
-        self.bin_edges = None
-        model = None
-        
-        # loop over windows
+        self.best_params         = None
+        self.bin_edges           = None
+        self._reset_run_state()
+        model              = None
+        model_feature_cols = self.feature_cols  # BUG A FIX: tracks what the live model was trained on
+                                                # X_test must always match this, not the current window's
+                                                # candidate features — they can diverge without a retrain
+
         for w, g in enumerate(all_graphs):
             train_start = g['train_start_idx']
             train_end   = g['train_end_idx']
@@ -266,56 +333,78 @@ class BaseRetrainer(ABC):
 
             if test_end > len(self.df):
                 continue
-            
-            # slice data
-            X_train    = self.df[self.feature_cols].iloc[train_start:train_end].values
-            y_r_train  = self.df[self.target].iloc[train_start:train_end].values
-            X_test     = self.df[self.feature_cols].iloc[test_start:test_end].values
-            y_r_test   = self.df[self.target].iloc[test_start:test_end].values
-            
-            triggered = False
-            signal_fired = False
+
+            # Candidate features for this window — may differ from model_feature_cols
+            # (CausalFeatureRetrainer swaps these based on the current causal graph)
+            candidate_cols = self._get_feature_cols_for_window(g)
+
+            context   = self._compute_window_context(w, g, all_graphs)
+            y_r_train = self._impute_target(self.df[self.target].iloc[train_start:train_end].values)
+            y_r_test  = self._impute_target(self.df[self.target].iloc[test_start:test_end].values)
+
+            triggered       = False
+            signal_fired    = False
             cooldown_active = False
-            
+
             if w == 0 or model is None:
-                # first window: freeze bins and train initial model
+                X_train = self._impute(self.df[candidate_cols].iloc[train_start:train_end].values)
                 self.freeze_bin_edges(y_r_train)
                 y_train = self.apply_bins(y_r_train)
-                model = self.run_grid_search(X_train, y_train, warm=False)
+                model   = self.run_grid_search(X_train, y_train, warm=False)
                 self.last_retrain_window = w
-                
+                model_feature_cols = candidate_cols   # record what this model knows
+
             else:
-                signal_fired = self.should_retrain(w, g=g, all_graphs=all_graphs) 
-                cooldown_active = self.in_cooldown(w) # check cooldown before allowing retrain
-                
-                if signal_fired and not cooldown_active: # only retrain if signal fires and we're not in cooldown
-                    self.freeze_bin_edges(y_r_train) # refreeze bins to match new training distribution before rebinning
+                signal_fired    = self.should_retrain(w, g=g, all_graphs=all_graphs, **context)
+                cooldown_active = self.in_cooldown(w)
+
+                if signal_fired and not cooldown_active:
+                    X_train = self._impute(self.df[candidate_cols].iloc[train_start:train_end].values)
+                    self.freeze_bin_edges(y_r_train)
                     y_train = self.apply_bins(y_r_train)
-                    model = self.run_grid_search(X_train, y_train, warm=True)
+                    model   = self.run_grid_search(X_train, y_train, warm=True)
                     self.last_retrain_window = w
-                    triggered = True # for recording in results
-                    
-            # evaluate current model on test set
+                    triggered          = True
+                    model_feature_cols = candidate_cols  # model now knows the new feature set
+                    self._post_retrain_hook()
+
+            # BUG A FIX: X_test uses model_feature_cols (what the live model was trained on),
+            # NOT candidate_cols (current window's graph-derived feature set).
+            # These are identical for all retrainers except CausalFeatureRetrainer,
+            # where the graph — and thus candidate_cols — can change every window.
+            X_test = self._impute(self.df[model_feature_cols].iloc[test_start:test_end].values)
+
             y_test = self.apply_bins(y_r_test)
             f1, directional_acc, pred, y_true = self.evaluate(model, X_test, y_test)
-            
-            # record results
-            self.results.append({
-                'window': w + 1,
-                'date_start': g['date_start'],
-                'date_end': g['date_end'],
-                'total_edges': len(g['edges']),
-                'retrain_triggered': triggered, # did a retrain actually occur at this window?
-                'signal_fired': signal_fired, # did the retrain signal fire (even if we were in cooldown and couldn't retrain)?
-                'cooldown_active': cooldown_active,
+
+            result = {
+                'window':                w + 1,
+                'date_start':            g['date_start'],
+                'date_end':              g['date_end'],
+                'total_edges':           len(g['edges']),
+                'retrain_triggered':     triggered,
+                'signal_fired':          signal_fired,
+                'cooldown_active':       cooldown_active,
                 'windows_since_retrain': w - self.last_retrain_window,
-                'f1': round(f1, 4),
-                'directional_acc': round(directional_acc, 4),
-                'y_true': y_true.tolist(),
-                'y_pred': pred.tolist(),
-                'best_params': str(self.best_params)
-            })
-            
+                'f1':                    round(f1, 4),
+                'directional_acc':       round(directional_acc, 4),
+                'y_true':                _to_json(y_true.tolist()),
+                'y_pred':                _to_json(pred.tolist()),
+                'best_params':           _to_json(self.best_params),
+            }
+
+            result.update(self._extra_result_fields(w, g, triggered, context))
+
+            # BUG B FIX: fill optional subclass columns with None so every retrainer
+            # produces the same schema. Without this, StaticRetrainer rows have 13 cols
+            # and MSMRetrainer rows have 15 — appending them to the same partial CSV
+            # causes a pandas ParserError on read-back.
+            _OPTIONAL_FIELDS = {'graph_msm': None, 'unstable_edges': None, 'active_features': None}
+            for k, v in _OPTIONAL_FIELDS.items():
+                result.setdefault(k, v)
+
+            self.results.append(result)
+
         return pd.DataFrame(self.results)
 
 
@@ -327,7 +416,9 @@ class StaticRetrainer(BaseRetrainer):
     '''
     def should_retrain(self, w, **kwargs):
         return False
-    
+
+
+
 class FixedScheduleRetrainer(BaseRetrainer):
     '''
     Retrain at fixed intervals (e.g. every 5 windows), regardless of MSM signal.
@@ -338,7 +429,9 @@ class FixedScheduleRetrainer(BaseRetrainer):
         
     def should_retrain(self, w, **kwargs):
         return (w % self.retrain_interval) == 0
-    
+
+
+
 class PerformanceRetrainer(BaseRetrainer):
     '''
     Retrain whenever performance drops below a certain threshold.
@@ -376,16 +469,28 @@ class PerformanceRetrainer(BaseRetrainer):
         current   = np.mean(recent_f1)
 
         return (baseline - current) > self.drop_threshold
+
+
+
 class RandomRetrainer(BaseRetrainer):
     '''
-    Control strategy: randomly trigger retrains with a fixed probability.
+    Control strategy: randomly trigger retrains with fixed probability p.
+    Uses a seeded local RNG to ensure reproducibility across runs.
     '''
-    def __init__(self, *args, p=0.1, **kwargs):
+    def __init__(self, *args, p=0.1, seed=42, **kwargs):
         super().__init__(*args, **kwargs)
-        self.p = p
-        
+        self.p    = p
+        self.seed = seed
+        self.rng  = np.random.default_rng(seed)   # Fix 8: local seeded RNG
+
+    def _reset_run_state(self):
+        self.rng = np.random.default_rng(self.seed)  # reset to same seed each run
+
     def should_retrain(self, w, **kwargs):
-        return np.random.rand() < self.p
+        return self.rng.random() < self.p
+
+
+
 class ADWINRetrainer(BaseRetrainer):
     '''
     Retrain whenever ADWIN detects a drift in the performance metric.
@@ -395,24 +500,29 @@ class ADWINRetrainer(BaseRetrainer):
         self.delta = delta
         self.adwin = ADWIN(delta=delta)
         
-    def run(self, all_graphs):
-        self.adwin = ADWIN(delta=self.delta) # reset ADWIN state for new run
-        return super().run(all_graphs)
+    def _reset_run_state(self):
+        self.adwin = ADWIN(delta=self.delta)
     
     def should_retrain(self, w, **kwargs):
         if not self.results:
-            return False # no performance data yet
-        
-        last = self.results[-1] # get most recent window's results
-        
-        for true, pred in zip(last['y_true'], last['y_pred']):
-            self.adwin.update(int(true == pred)) # update ADWIN with 1 for correct, 0 for incorrect
-            
-            if self.adwin.drift_detected:
-                self.adwin = ADWIN(delta=self.delta) # reset after drift detected to avoid repeated triggers
-                return True
-            
+            return False
+
+        last = self.results[-1]
+        y_true = json.loads(last['y_true'])   # deserialise from JSON string
+        y_pred = json.loads(last['y_pred'])   # deserialise from JSON string
+
+        for true, pred in zip(y_true, y_pred):
+            self.adwin.update(int(true == pred))
+
+        if self.adwin.drift_detected:
+            self.adwin = ADWIN(delta=self.delta)
+            return True
+
         return False
+
+
+
+# ----- MSM-BASED RETRAINERS -----
 class MSMRetrainer(BaseRetrainer):
     '''
     Retrain whenever graph-level MSM drops below a certain threshold.
@@ -426,7 +536,6 @@ class MSMRetrainer(BaseRetrainer):
         self._provisional_flag = False # internal flag to track if we're in the provisional period after a drop below tau_1
         self._provisional_edge_scores = {} # to track which edges are unstable during the provisional period
         self._expanded_lookback = max(1, int(lookback * r)) # expanded lookback for stage 2 confirmation
-        
         
         
     def compute_graph_msm(self, all_graphs, w):
@@ -445,15 +554,13 @@ class MSMRetrainer(BaseRetrainer):
             all_edges |= g['edges']
 
         if not all_edges:
-            return 0.0, {}
+            return 1.0, {}
 
         edge_scores = {
             e: sum(1 for g in recent_windows if e in g['edges']) / n
             for e in all_edges
         }
         return np.mean(list(edge_scores.values())), edge_scores
-    
-    
     
     def compute_expanded_msm(self, all_graphs, w, lookback):
         '''
@@ -469,7 +576,7 @@ class MSMRetrainer(BaseRetrainer):
             all_edges |= g['edges']
 
         if not all_edges:
-            return 0.0
+            return 1.0, {}
 
         edge_scores = {
             e: sum(1 for g in recent_windows if e in g['edges']) / n
@@ -477,146 +584,68 @@ class MSMRetrainer(BaseRetrainer):
         }
         return float(np.mean(list(edge_scores.values()))), edge_scores
     
-    
-    
     def should_retrain(self, w, all_graphs=None, curr_msm=None, **kwargs):
         if w < self.lookback or all_graphs is None:
-            return False # not enough history to compute MSM yet
-        
+            return False
+
         if curr_msm is None:
             curr_msm, edge_scores = self.compute_graph_msm(all_graphs, w)
         else:
-            _, edge_scores = self.compute_graph_msm(all_graphs, w) # compute edge scores for logging even if curr_msm is provided
-        
-        # stage 1: first window below tau_1, enter provisional period
+            _, edge_scores = self.compute_graph_msm(all_graphs, w)
+
+        # stage 1: first window below tau_1 → enter provisional period
         if curr_msm < self.tau_1 and not self._provisional_flag:
-            self._provisional_flag = True
-            self._provisional_edge_scores = edge_scores # store edge scores for logging
-            return False # wait for next window to confirm drop
-        
+            self._provisional_flag        = True
+            self._provisional_edge_scores = edge_scores
+            return False  # wait one window before confirming
+
         if self._provisional_flag:
             if w < self._expanded_lookback:
-                return False # not enough history to confirm yet
-            # stage 2: if we're in provisional period, check if MSM is still below tau_2
+                return False  # not enough history yet for stage 2
+
+            # stage 2: confirm over expanded lookback window.
+            # If the longer-window MSM is ALSO below tau_2, the break is real.
             expanded_msm, _ = self.compute_expanded_msm(all_graphs, w, self._expanded_lookback)
-            if expanded_msm >= self.tau_2:
-                self._provisional_flag = False # reset flag if expanded MSM is above tau_2
-                return True # trigger retrain
-        
-        
-        # recovery: if MSM goes back above tau_1, exit provisional period
-        if curr_msm >= self.tau_1:
-            self._provisional_flag = False
-            self._provisional_edge_scores = {} # clear edge scores for logging
-        return False
-    
-    def run(self, all_graphs):
-        """
-        Overrides BaseRetrainer.run() to log MSM-specific fields:
-            - graph_msm:      causal stability score per window
-            - total_edges:    graph density per window
-            - unstable_edges: edges that drove instability at each retrain
+            if expanded_msm < self.tau_2:           # FIX: was `>= self.tau_2`
+                self._provisional_flag = False
+                return True
 
-        All other logic — bin edges, grid search, evaluation,
-        cooldown — is identical to the base class.
-        """
-
-        # ── State reset ────────────────────────────────────────────────────────
-        # Must repeat base class resets here since we are not calling super().run()
-        # Also reset MSM-specific state
-        self._provisional_flag   = False
-        self._provisional_edge_scores = {}
-        self.results             = []
-        self.best_params         = None
-        self.bin_edges           = None
-        self.last_retrain_window = -999
-        model                    = None
-
-        for w, g in enumerate(all_graphs):
-
-            # ── Window boundaries ──────────────────────────────────────────────
-            train_start = g['train_start_idx']
-            train_end   = g['train_end_idx']
-            test_start  = train_end
-            test_end    = test_start + self.step
-
-            if test_end > len(self.df):
-                continue
-
-            # slice
-            X_train   = self.df[self.feature_cols].iloc[train_start:train_end].values
-            y_r_train = self.df[self.target].iloc[train_start:train_end].values
-            X_test    = self.df[self.feature_cols].iloc[test_start:test_end].values
-            y_r_test  = self.df[self.target].iloc[test_start:test_end].values
-
-            triggered       = False
-            signal_fired    = False
-            cooldown_active = False
-
-            # compute msm
-            curr_msm, edge_scores = (
-                self.compute_graph_msm(all_graphs, w)
-                if w >= self.lookback else (1.0, {})
-            )
-
-            if w == 0 or model is None:
-                # Initial training — full grid search, freeze bin edges
-                self.freeze_bin_edges(y_r_train)
-                y_train = self.apply_bins(y_r_train)
-                model   = self.run_grid_search(X_train, y_train, warm=False)
-                self.last_retrain_window = w
-
-            else:
-                signal_fired    = self.should_retrain(w, all_graphs=all_graphs, curr_msm=curr_msm)
-                cooldown_active = self.in_cooldown(w)
-
-                if signal_fired and not cooldown_active:
-                    # Refreeze edges to match new training window distribution
-                    # then rebin before warm grid search
-                    self.freeze_bin_edges(y_r_train)
-                    y_train = self.apply_bins(y_r_train)
-                    model   = self.run_grid_search(X_train, y_train, warm=True)
-                    self.last_retrain_window = w
-                    triggered = True
-
-            # evaluate
-            # y_test uses current frozen edges — always consistent with model
-            y_test           = self.apply_bins(y_r_test)
-            f1, directional_acc, pred, y_true = self.evaluate(model, X_test, y_test)
-
-            self.results.append({
-                'window':                w + 1,
-                'date_start':            g['date_start'],
-                'date_end':              g['date_end'],
-                'signal_fired':          signal_fired,
-                'cooldown_active':       cooldown_active,
-                'retrain_triggered':     triggered,
-                'windows_since_retrain': w - self.last_retrain_window,
-                'f1':                    f1,
-                'directional_acc':       directional_acc,
-                'y_true':                y_true.tolist(),
-                'y_pred':                pred.tolist(),
-                'best_params':           str(self.best_params),
-
-                # MSM-specific fields — only in MSMRetrainer results CSV
-                'total_edges':           len(g['edges']),
-                'graph_msm':             round(curr_msm, 4),
-
-                # Which edges drove instability at this retrain point
-                # Saved as string dict — parse with ast.literal_eval in analysis.py
-                # Empty dict if no retrain triggered this window
-                'unstable_edges':        str({
-                    str(e): round(s, 3)
-                    for e, s in edge_scores.items()
-                    if s < self.tau_1
-                }) if triggered else '{}',
-            })
-            
-            if triggered:
+            # recovery: short-window MSM climbed back above tau_1 → abort provisional
+            if curr_msm >= self.tau_1:
+                self._provisional_flag        = False
                 self._provisional_edge_scores = {}
-                
+                return False
 
-        return pd.DataFrame(self.results)
+        return False  # FIX: was implicit None
+    
+    def _reset_run_state(self):
+        self._provisional_flag        = False
+        self._provisional_edge_scores = {}
+
+    def _compute_window_context(self, w, g, all_graphs):
+        curr_msm, edge_scores = (
+            self.compute_graph_msm(all_graphs, w)
+            if w >= self.lookback else (1.0, {})
+        )
+        return {'curr_msm': curr_msm, 'edge_scores': edge_scores}
+
+    def _extra_result_fields(self, w, g, triggered, context) -> dict:
+        curr_msm   = context.get('curr_msm',   1.0)
+        edge_scores = context.get('edge_scores', {})
+        return {
+            'graph_msm':     round(curr_msm, 4),
+            'unstable_edges': _to_json({          # Fix 13
+                str(e): round(s, 3)
+                for e, s in edge_scores.items()
+                if s < self.tau_1
+            }) if triggered else '{}',
+        }
+
+    def _post_retrain_hook(self):
+        self._provisional_edge_scores = {}
+
+
+
 class SPYFocusedMSMRetrainer(MSMRetrainer):
     '''
     Variant of MSM retrainer that focuses on edges connected to SPY.
@@ -629,179 +658,110 @@ class SPYFocusedMSMRetrainer(MSMRetrainer):
         
     def compute_graph_msm(self, all_graphs, w):
         '''
-        Computes mean MSM of edges connected to SPY in the last `lookback` windows.
-        Returns: (mean_msm, dict of {edge: msm_score})
+        Computes mean MSM of edges where SPY is the target node,
+        across the last `lookback` windows.
+        Returns (mean_msm, edge_scores dict).
         '''
-        start = max(0, w - self.lookback + 1)
+        start          = max(0, w - self.lookback + 1)
         recent_windows = all_graphs[start: w + 1]
-        n = len(recent_windows)
+        n              = len(recent_windows)
 
         all_edges = set()
         for g in recent_windows:
-            all_edges |= {e for e in g['edges'] if e[1] == self.spy_idx} # only consider edges where SPY is the target
+            all_edges |= {e for e in g['edges'] if e[1] == self.spy_idx}
 
         if not all_edges:
-            return 0.0, {}
+            # Fix 3: return 1.0 (fully stable) not 0.0 (fully unstable).
+            # SPY having no incoming edges is a valid sparse-graph state,
+            # not a signal of causal instability.
+            return 1.0, {}
 
         edge_scores = {
             e: sum(1 for g in recent_windows if e in g['edges']) / n
             for e in all_edges
         }
-        return np.mean(list(edge_scores.values())), edge_scores
+        return float(np.mean(list(edge_scores.values()))), edge_scores
+
+
 
 class MSMTimeoutRetrainer(MSMRetrainer):
-    
-    
     '''
-    if msm sits between tau 1 and tau 2 for max_provisional_windows, trigger retrain anyway even without a confirmed drop below tau_2
+    Triggers a retrain if MSM stays in the provisional zone
+    (between tau_1 and tau_2) for more than max_provisional_windows,
+    rather than waiting indefinitely for a tau_2 confirmation.
     '''
     def __init__(self, *args, max_provisional_windows=4, **kwargs):
         super().__init__(*args, **kwargs)
-        self.max_provisional_windows = max_provisional_windows
-        self._provisional_window_count = 0 # counts how many windows we've been in the provisional period without confirming a drop below tau_2
-        
+        self.max_provisional_windows  = max_provisional_windows
+        self._provisional_window_count = 0
+
+    def _reset_run_state(self):
+        super()._reset_run_state()
+        self._provisional_window_count = 0   # Fix 1: was never reset
+
     def should_retrain(self, w, all_graphs=None, curr_msm=None, **kwargs):
         if w < self.lookback or all_graphs is None:
-            return False # not enough history to compute MSM yet
-        
-        if curr_msm is None:
-            curr_msm, edge_scores = self.compute_graph_msm(all_graphs, w)
-        else:
-            _, edge_scores = self.compute_graph_msm(all_graphs, w) # compute edge scores for logging even if curr_msm is provided
-        
-        # stage 1: first window below tau_1, enter provisional period
-        if curr_msm < self.tau_1 and not self._provisional_flag:
-            self._provisional_flag = True
-            self._provisional_window_count = 1 # reset counter when we first enter provisional period
-            self._provisional_edge_scores = edge_scores # store edge scores for logging
-            return False # wait for next window to confirm drop
-        
+            return False
+
+        parent_result = super().should_retrain(w, all_graphs=all_graphs, curr_msm=curr_msm, **kwargs)
+        if parent_result:
+            self._provisional_window_count = 0
+            return True
+
         if self._provisional_flag:
             self._provisional_window_count += 1
-            
-            # force retrain if stuck for too long
             if self._provisional_window_count >= self.max_provisional_windows:
-                self._provisional_flag = False # reset flag after forced retrain
-                self._provisional_window_count = 0 # reset counter
-                return True # trigger retrain
-            
-            if curr_msm < self.tau_2:
-                self._provisional_flag = False # reset flag after confirming drop
-                self._provisional_window_count = 0 # reset counter
-                return True # trigger retrain
-            
-        if curr_msm >= self.tau_1:
-            self._provisional_flag = False
-            self._provisional_window_count = 0 # reset counter if we exit provisional period due to recovery
-            self._provisional_edge_scores = {} # clear edge scores for logging
+                self._provisional_flag         = False
+                self._provisional_window_count = 0
+                return True
+        else:
+            self._provisional_window_count = 0
+
         return False
-    
+
+
+
 class CausalFeatureRetrainer(MSMRetrainer):
     '''
-    MSM + causal feature selection
+    MSM-triggered retraining + causal feature selection.
+    Only features with a causal edge into SPY are used for training.
     '''
     def __init__(self, *args, spy_idx=10, all_features=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.spy_idx = spy_idx # index of SPY_lr in feature_cols, used to identify SPY-connected edges in the graph (10)
-        self.all_features = all_features or self.feature_cols # list of all feature names corresponding to graph node indices, used for logging and interpretation of unstable edges in results analysis
-        self._active_features = list(self.all_features) # start with all features
-        
+        self.spy_idx      = spy_idx
+        self.all_features = all_features or self.feature_cols
+        self._active_features = list(self.all_features)
+
+    def _reset_run_state(self):
+        super()._reset_run_state()
+        self._active_features = list(self.all_features)
+
+    def _get_feature_cols_for_window(self, g):
+        """Select only SPY-parent features for this window.
+        Reset best_params if the feature set changes (Fix 7)."""
+        active_indices = self._get_spy_parent_indices(g)
+        new_active     = [self.all_features[idx] for idx in active_indices]
+
+        if new_active != self._active_features:
+            self.best_params = None   # Fix 7: warm grid is invalid for a different feature set
+
+        self._active_features = new_active
+        return self._active_features
+
+    def _extra_result_fields(self, w, g, triggered, context) -> dict:
+        fields = super()._extra_result_fields(w, g, triggered, context)
+        fields['active_features'] = _to_json(self._active_features)  # Fix 13
+        return fields
+
     def _get_spy_parent_indices(self, g):
-        # returns indices in feature_cols of all features that have an edge to SPY in graph g
         spy_parents = {
             e[0] for e in g['edges']
-            if e[1] == self.spy_idx
-            and e[0] != self.spy_idx # exclude self-loop on SPY
+            if e[1] == self.spy_idx and e[0] != self.spy_idx
         }
         if not spy_parents:
-            return list(range(len(self.all_features))) # if no parents, consider all features as active
-        
+            return list(range(len(self.all_features)))
         feature_indices = sorted([
             idx for idx in spy_parents
             if 0 <= idx < len(self.all_features)
         ])
-        
-        return feature_indices if feature_indices else list(range(len(self.all_features))) # if no valid parents, consider all features as active
-    
-    def run(self, all_graphs):
-        self._provisional_flag = False # reset provisional flag for new run
-        self._provisional_edge_scores = {} # reset edge scores for new run
-        self.results = [] # reset results for new run
-        self.best_params = None # reset best params for new run
-        self.bin_edges = None # reset bin edges for new run
-        self.last_retrain_window = -999 # reset last retrain window for new run
-        active_indices = list(range(len(self.all_features))) # start with all features active
-        
-        for w, g in enumerate(all_graphs):
-            # update active features based on current graph structure
-            active_indices = self._get_spy_parent_indices(g)
-            self._active_features = [self.all_features[idx] for idx in active_indices]
-            
-            # slice data with active features only
-            train_start = g['train_start_idx']
-            train_end   = g['train_end_idx']
-            test_start  = train_end
-            test_end    = test_start + self.step
-
-            if test_end > len(self.df):
-                continue
-            
-            X_train   = self.df[self._active_features].iloc[train_start:train_end].values
-            y_r_train = self.df[self.target].iloc[train_start:train_end].values
-            X_test    = self.df[self._active_features].iloc[test_start:test_end].values
-            y_r_test  = self.df[self.target].iloc[test_start:test_end].values
-            
-            triggered       = False
-            signal_fired    = False
-            cooldown_active = False
-
-            curr_msm, edge_scores = (
-                self.compute_graph_msm(all_graphs, w)
-                if w >= self.lookback else (1.0, {})
-            )
-
-            if w == 0 or model is None:
-                # Initial training — full grid search, freeze bin edges
-                self.freeze_bin_edges(y_r_train)
-                y_train = self.apply_bins(y_r_train)
-                model   = self.run_grid_search(X_train, y_train, warm=False)
-                self.last_retrain_window = w
-
-            else:
-                signal_fired    = self.should_retrain(w, all_graphs=all_graphs, curr_msm=curr_msm)
-                cooldown_active = self.in_cooldown(w)
-
-                if signal_fired and not cooldown_active:
-                    # Refreeze edges to match new training window distribution
-                    # then rebin before warm grid search
-                    self.freeze_bin_edges(y_r_train)
-                    y_train = self.apply_bins(y_r_train)
-                    model   = self.run_grid_search(X_train, y_train, warm=True)
-                    self.last_retrain_window = w
-                    triggered = True
-
-            # evaluate
-            y_test           = self.apply_bins(y_r_test)
-            f1, directional_acc, pred, y_true = self.evaluate(model, X_test, y_test)
-
-            # record results with additional field for which features were active this window
-            self.results.append({
-                'window':                w + 1,
-                'date_start':            g['date_start'],
-                'date_end':              g['date_end'],
-                'active_features':       str(self._active_features), # log which features were active this window
-                'signal_fired':          signal_fired,
-                'cooldown_active':       cooldown_active,
-                'retrain_triggered':     triggered,
-                'windows_since_retrain': w - self.last_retrain_window,
-                'f1':                    f1,
-                'directional_acc':       directional_acc,
-                'y_true':                y_true.tolist(),
-                'y_pred':                pred.tolist(),
-                'best_params':           str(self.best_params),
-                'total_edges':           len(g['edges']),
-                'graph_msm':             round(curr_msm, 4),
-            })
-            
-        return pd.DataFrame(self.results)
-        
+        return feature_indices if feature_indices else list(range(len(self.all_features)))
