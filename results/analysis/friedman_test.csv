@@ -1,4 +1,0 @@
-model_type,n_retrainers,n_windows,chi2_stat,p_value,significant
-lr,122,83,371.9774,0.0,True
-rf,122,83,416.4359,0.0,True
-xgboost,122,83,434.4404,0.0,True
