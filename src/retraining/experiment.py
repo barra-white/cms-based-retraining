@@ -191,7 +191,6 @@ def run_experiment(name, cls, kwargs, base_args, all_graphs):
     # tag model type for later analysis
     results['model_type'] = base_args['model_type']
     
-    results['regime'] = results['date'].apply(_classify_regime)
     results['regime'] = pd.to_datetime(results['date_start']).apply(_classify_regime)  
     results['stress_windows_days_at_run'] = STRESS_WINDOW_DAYS  
     # save csv immideiately to avoid losing results if experiment crashes later

@@ -584,15 +584,14 @@ class ADWINRetrainer(BaseRetrainer):
             return False
 
         last = self.results[-1]
-        y_true = json.loads(last['y_true'])   # deserialise from JSON string
-        y_pred = json.loads(last['y_pred'])   # deserialise from JSON string
+        y_true = json.loads(last['y_true'])
+        y_pred = json.loads(last['y_pred'])
 
         for true, pred in zip(y_true, y_pred):
             self.adwin.update(int(true == pred))
-
-        if self.adwin.drift_detected:
-            self.adwin = ADWIN(delta=self.delta)
-            return True
+            if self.adwin.drift_detected:
+                self.adwin = ADWIN(delta=self.delta)
+                return True
 
         return False
 
