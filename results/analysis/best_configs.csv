@@ -1,7 +1,7 @@
 model_type,exp_type,retrainer,mean_f1,std_f1,mean_dir_accuracy,retrains,windows,rank
 lr,adwin,adwin_delta_0.01,0.4054,0.1154,0.5766,1,83,1
-lr,adwin,adwin_delta_0.05,0.3822,0.114,0.5995,0,83,2
-lr,adwin,adwin_delta_0.1,0.3822,0.114,0.5995,0,83,3
+lr,adwin,adwin_delta_0.002,0.3822,0.114,0.5995,0,83,2
+lr,adwin,adwin_delta_0.005,0.3822,0.114,0.5995,0,83,3
 lr,causal,causal_tau_1_0.83_tau_2_0.72_lb_3,0.3798,0.1265,0.4483,18,83,1
 lr,causal,causal_tau_1_0.83_tau_2_0.75_lb_3,0.3798,0.1265,0.4483,18,83,2
 lr,causal,causal_tau_1_0.8_tau_2_0.72_lb_3,0.3777,0.1219,0.4371,16,83,3
@@ -22,9 +22,9 @@ lr,static,static,0.3822,0.114,0.5995,0,83,1
 lr,timeout_msm,timeout_msm_tau_1_0.88_tau_2_0.72_lb_4,0.4178,0.118,0.5082,19,83,1
 lr,timeout_msm,timeout_msm_tau_1_0.88_tau_2_0.72_lb_3,0.4151,0.1172,0.5066,19,83,2
 lr,timeout_msm,timeout_msm_tau_1_0.88_tau_2_0.75_lb_3,0.4151,0.1172,0.5066,19,83,3
-rf,adwin,adwin_delta_0.01,0.3644,0.1026,0.559,0,83,1
-rf,adwin,adwin_delta_0.05,0.3644,0.1026,0.559,0,83,2
-rf,adwin,adwin_delta_0.1,0.3644,0.1026,0.559,0,83,3
+rf,adwin,adwin_delta_0.002,0.3644,0.1026,0.559,0,83,1
+rf,adwin,adwin_delta_0.005,0.3644,0.1026,0.559,0,83,2
+rf,adwin,adwin_delta_0.01,0.3644,0.1026,0.559,0,83,3
 rf,causal,causal_tau_1_0.8_tau_2_0.72_lb_3,0.4108,0.12,0.4727,16,83,1
 rf,causal,causal_tau_1_0.8_tau_2_0.75_lb_3,0.4108,0.12,0.4727,16,83,2
 rf,causal,causal_tau_1_0.83_tau_2_0.72_lb_3,0.3936,0.1224,0.4296,18,83,3
@@ -45,9 +45,9 @@ rf,static,static,0.3644,0.1026,0.559,0,83,1
 rf,timeout_msm,timeout_msm_tau_1_0.88_tau_2_0.75_lb_4,0.4356,0.1047,0.5219,20,83,1
 rf,timeout_msm,timeout_msm_tau_1_0.88_tau_2_0.78_lb_4,0.4356,0.1047,0.5219,20,83,2
 rf,timeout_msm,timeout_msm_tau_1_0.83_tau_2_0.78_lb_3,0.4251,0.0977,0.5212,18,83,3
-xgboost,adwin,adwin_delta_0.01,0.3724,0.1169,0.5654,0,83,1
-xgboost,adwin,adwin_delta_0.05,0.3724,0.1169,0.5654,0,83,2
-xgboost,adwin,adwin_delta_0.1,0.3724,0.1169,0.5654,0,83,3
+xgboost,adwin,adwin_delta_0.002,0.3724,0.1169,0.5654,0,83,1
+xgboost,adwin,adwin_delta_0.005,0.3724,0.1169,0.5654,0,83,2
+xgboost,adwin,adwin_delta_0.01,0.3724,0.1169,0.5654,0,83,3
 xgboost,causal,causal_tau_1_0.8_tau_2_0.72_lb_3,0.4183,0.1218,0.4697,16,83,1
 xgboost,causal,causal_tau_1_0.8_tau_2_0.75_lb_3,0.4183,0.1218,0.4697,16,83,2
 xgboost,causal,causal_tau_1_0.83_tau_2_0.78_lb_3,0.4044,0.125,0.4389,18,83,3

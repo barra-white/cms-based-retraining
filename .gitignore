@@ -216,3 +216,6 @@ testing/
 #results/
 
 interpret_results.py
+
+results/plots/
+results/analysis/

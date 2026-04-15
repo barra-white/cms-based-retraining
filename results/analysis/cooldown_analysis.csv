@@ -1,4 +1,6 @@
 model_type,retrainer,exp_type,signals_fired,retrains_triggered,cooldown_suppressed,suppression_rate
+lr,adwin_delta_0.002,adwin,0,0,0,
+lr,adwin_delta_0.005,adwin,0,0,0,
 lr,adwin_delta_0.01,adwin,1,1,0,0.0
 lr,adwin_delta_0.05,adwin,0,0,0,
 lr,adwin_delta_0.1,adwin,0,0,0,
@@ -119,6 +121,8 @@ lr,timeout_msm_tau_1_0.8_tau_2_0.72_lb_6,timeout_msm,37,19,18,0.4865
 lr,timeout_msm_tau_1_0.8_tau_2_0.75_lb_3,timeout_msm,26,16,10,0.3846
 lr,timeout_msm_tau_1_0.8_tau_2_0.75_lb_4,timeout_msm,35,19,16,0.4571
 lr,timeout_msm_tau_1_0.8_tau_2_0.75_lb_6,timeout_msm,37,19,18,0.4865
+rf,adwin_delta_0.002,adwin,0,0,0,
+rf,adwin_delta_0.005,adwin,0,0,0,
 rf,adwin_delta_0.01,adwin,0,0,0,
 rf,adwin_delta_0.05,adwin,0,0,0,
 rf,adwin_delta_0.1,adwin,0,0,0,
@@ -239,6 +243,8 @@ rf,timeout_msm_tau_1_0.8_tau_2_0.72_lb_6,timeout_msm,37,19,18,0.4865
 rf,timeout_msm_tau_1_0.8_tau_2_0.75_lb_3,timeout_msm,26,16,10,0.3846
 rf,timeout_msm_tau_1_0.8_tau_2_0.75_lb_4,timeout_msm,35,19,16,0.4571
 rf,timeout_msm_tau_1_0.8_tau_2_0.75_lb_6,timeout_msm,37,19,18,0.4865
+xgboost,adwin_delta_0.002,adwin,0,0,0,
+xgboost,adwin_delta_0.005,adwin,0,0,0,
 xgboost,adwin_delta_0.01,adwin,0,0,0,
 xgboost,adwin_delta_0.05,adwin,0,0,0,
 xgboost,adwin_delta_0.1,adwin,0,0,0,

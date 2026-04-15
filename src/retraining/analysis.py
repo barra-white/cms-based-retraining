@@ -40,7 +40,7 @@ STRESS_EVENTS = {
     'covid_crash':    pd.Timestamp('2020-02-20'),
     'fed_hikes_2022': pd.Timestamp('2022-03-16'),
 }
-STRESS_WINDOW_DAYS = 120  # ±3 calendar months = one financial quarter
+STRESS_WINDOW_DAYS = 60  # ±3 calendar months = one financial quarter
 
 
 # ----- EXPERIMENT TYPE PREFIXES ----- #

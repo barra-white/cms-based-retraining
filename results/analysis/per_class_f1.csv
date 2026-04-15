@@ -1,4 +1,10 @@
 model_type,retrainer,exp_type,class,class_name,f1
+lr,adwin_delta_0.002,adwin,0,down,0.5243
+lr,adwin_delta_0.002,adwin,1,neutral,0.124
+lr,adwin_delta_0.002,adwin,2,up,0.5784
+lr,adwin_delta_0.005,adwin,0,down,0.5243
+lr,adwin_delta_0.005,adwin,1,neutral,0.124
+lr,adwin_delta_0.005,adwin,2,up,0.5784
 lr,adwin_delta_0.01,adwin,0,down,0.5377
 lr,adwin_delta_0.01,adwin,1,neutral,0.3445
 lr,adwin_delta_0.01,adwin,2,up,0.5621
@@ -359,6 +365,12 @@ lr,timeout_msm_tau_1_0.8_tau_2_0.75_lb_4,timeout_msm,2,up,0.5197
 lr,timeout_msm_tau_1_0.8_tau_2_0.75_lb_6,timeout_msm,0,down,0.5344
 lr,timeout_msm_tau_1_0.8_tau_2_0.75_lb_6,timeout_msm,1,neutral,0.4713
 lr,timeout_msm_tau_1_0.8_tau_2_0.75_lb_6,timeout_msm,2,up,0.5186
+rf,adwin_delta_0.002,adwin,0,down,0.5489
+rf,adwin_delta_0.002,adwin,1,neutral,0.1132
+rf,adwin_delta_0.002,adwin,2,up,0.504
+rf,adwin_delta_0.005,adwin,0,down,0.5489
+rf,adwin_delta_0.005,adwin,1,neutral,0.1132
+rf,adwin_delta_0.005,adwin,2,up,0.504
 rf,adwin_delta_0.01,adwin,0,down,0.5489
 rf,adwin_delta_0.01,adwin,1,neutral,0.1132
 rf,adwin_delta_0.01,adwin,2,up,0.504
@@ -719,6 +731,12 @@ rf,timeout_msm_tau_1_0.8_tau_2_0.75_lb_4,timeout_msm,2,up,0.5237
 rf,timeout_msm_tau_1_0.8_tau_2_0.75_lb_6,timeout_msm,0,down,0.5462
 rf,timeout_msm_tau_1_0.8_tau_2_0.75_lb_6,timeout_msm,1,neutral,0.4514
 rf,timeout_msm_tau_1_0.8_tau_2_0.75_lb_6,timeout_msm,2,up,0.5201
+xgboost,adwin_delta_0.002,adwin,0,down,0.5428
+xgboost,adwin_delta_0.002,adwin,1,neutral,0.1229
+xgboost,adwin_delta_0.002,adwin,2,up,0.5184
+xgboost,adwin_delta_0.005,adwin,0,down,0.5428
+xgboost,adwin_delta_0.005,adwin,1,neutral,0.1229
+xgboost,adwin_delta_0.005,adwin,2,up,0.5184
 xgboost,adwin_delta_0.01,adwin,0,down,0.5428
 xgboost,adwin_delta_0.01,adwin,1,neutral,0.1229
 xgboost,adwin_delta_0.01,adwin,2,up,0.5184

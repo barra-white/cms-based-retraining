@@ -102,6 +102,8 @@ lr,msm_tau_1_0.83_tau_2_0.75_lb_4,msm,0.4225,0.3408,75.0,8.0,-0.0817
 lr,msm_tau_1_0.83_tau_2_0.78_lb_4,msm,0.4225,0.3408,75.0,8.0,-0.0817
 lr,msm_tau_1_0.8_tau_2_0.72_lb_4,msm,0.4225,0.3408,75.0,8.0,-0.0817
 lr,msm_tau_1_0.8_tau_2_0.75_lb_4,msm,0.4225,0.3408,75.0,8.0,-0.0817
+lr,adwin_delta_0.002,adwin,0.3901,0.308,75.0,8.0,-0.0821
+lr,adwin_delta_0.005,adwin,0.3901,0.308,75.0,8.0,-0.0821
 lr,adwin_delta_0.05,adwin,0.3901,0.308,75.0,8.0,-0.0821
 lr,adwin_delta_0.1,adwin,0.3901,0.308,75.0,8.0,-0.0821
 lr,perf_drop_0.2_lookback_6,perf,0.3901,0.308,75.0,8.0,-0.0821
@@ -188,6 +190,8 @@ rf,msm_tau_1_0.88_tau_2_0.78_lb_3,msm,0.4184,0.4074,75.0,8.0,-0.011
 rf,timeout_msm_tau_1_0.88_tau_2_0.72_lb_3,timeout_msm,0.4184,0.4074,75.0,8.0,-0.011
 rf,timeout_msm_tau_1_0.88_tau_2_0.75_lb_3,timeout_msm,0.4184,0.4074,75.0,8.0,-0.011
 rf,timeout_msm_tau_1_0.88_tau_2_0.78_lb_3,timeout_msm,0.4184,0.4074,75.0,8.0,-0.011
+rf,adwin_delta_0.002,adwin,0.3655,0.3543,75.0,8.0,-0.0112
+rf,adwin_delta_0.005,adwin,0.3655,0.3543,75.0,8.0,-0.0112
 rf,adwin_delta_0.01,adwin,0.3655,0.3543,75.0,8.0,-0.0112
 rf,adwin_delta_0.05,adwin,0.3655,0.3543,75.0,8.0,-0.0112
 rf,adwin_delta_0.1,adwin,0.3655,0.3543,75.0,8.0,-0.0112
@@ -317,6 +321,8 @@ xgboost,msm_tau_1_0.88_tau_2_0.78_lb_3,msm,0.4399,0.4231,75.0,8.0,-0.0168
 xgboost,timeout_msm_tau_1_0.88_tau_2_0.72_lb_3,timeout_msm,0.4399,0.4231,75.0,8.0,-0.0168
 xgboost,timeout_msm_tau_1_0.88_tau_2_0.75_lb_3,timeout_msm,0.4399,0.4231,75.0,8.0,-0.0168
 xgboost,timeout_msm_tau_1_0.88_tau_2_0.78_lb_3,timeout_msm,0.4399,0.4231,75.0,8.0,-0.0168
+xgboost,adwin_delta_0.002,adwin,0.3741,0.3562,75.0,8.0,-0.0179
+xgboost,adwin_delta_0.005,adwin,0.3741,0.3562,75.0,8.0,-0.0179
 xgboost,adwin_delta_0.01,adwin,0.3741,0.3562,75.0,8.0,-0.0179
 xgboost,adwin_delta_0.05,adwin,0.3741,0.3562,75.0,8.0,-0.0179
 xgboost,adwin_delta_0.1,adwin,0.3741,0.3562,75.0,8.0,-0.0179
