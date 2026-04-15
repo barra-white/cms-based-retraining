@@ -188,6 +188,7 @@ def compute_per_class_f1(df):
 
 
 # ----- 3. DETECTION LATENCY ----- #
+SIGNAL_DRIVEN_TYPES = {'msm', 'spy_msm', 'timeout_msm', 'causal', 'adwin', 'performance', 'perf'}
 
 def compute_detection_latency(df):
     '''
@@ -197,10 +198,14 @@ def compute_detection_latency(df):
 
     detected=False means the strategy never retrains after the event onset
     — a missed regime shift.
+
+    NOTE: only signal-driven retrainers are included. Fixed-schedule, static,
+    and random retrainers fire by timing or chance, not detection — including
+    them here would be misleading.
     '''
     records = []
-    # boolean column already typed correctly by load_results()
-    retrains = df[df['retrain_triggered']].copy()
+    df_signal = df[df['exp_type'].isin(SIGNAL_DRIVEN_TYPES)].copy()
+    retrains  = df_signal[df_signal['retrain_triggered']].copy()
 
     for (model, retrainer), group in retrains.groupby(['model_type', 'retrainer']):
         exp_type = get_experiment_type(retrainer)
@@ -302,38 +307,32 @@ def compute_best_configs(df, top_k=3):
 
 # ----- 6. RETRAIN EFFICIENCY ----- #
 
-def compute_retrain_efficiency(df, lookback=3):
-    '''
-    Per retrain event: mean F1 in the preceding `lookback` windows vs.
-    the following `lookback` windows.
-    Positive f1_delta = retrain improved performance.
-    Negative f1_delta = retrain hurt (regime shifted immediately after).
-
-    in_stress_window flags whether the retrain fell inside a known stress
-    event — lets you compare efficiency of stress vs. non-stress retrains.
-    '''
+def compute_retrain_efficiency(df, n_windows=3):
     records = []
     for (model, retrainer), group in df.groupby(['model_type', 'retrainer']):
         group = group.sort_values('window').reset_index(drop=True)
-        retrain_idxs = group.index[group['retrain_triggered']].tolist()
+        exp_type = group['exp_type'].iloc[0] if 'exp_type' in group.columns else 'unknown'
+        retrain_idxs = group.index[group['retrain_triggered'].astype(bool)].tolist()
+        gains = []
         for idx in retrain_idxs:
-            pre_slice  = group.iloc[max(0, idx - lookback): idx]['f1']
-            post_slice = group.iloc[idx + 1: idx + 1 + lookback]['f1']
-            if pre_slice.empty or post_slice.empty:
-                continue
-            pre_f1, post_f1 = pre_slice.mean(), post_slice.mean()
-            records.append({
-                'model_type':       model,
-                'retrainer':        retrainer,
-                'exp_type':         get_experiment_type(retrainer),
-                'window':           int(group.iloc[idx]['window']),
-                'date_start':       group.iloc[idx]['date_start'],
-                'pre_retrain_f1':   round(pre_f1,  4),
-                'post_retrain_f1':  round(post_f1, 4),
-                'f1_delta':         round(post_f1 - pre_f1, 4),
-                'in_stress_window': in_any_window(group.iloc[idx]['date_start']),
-            })
-    return pd.DataFrame(records)
+            pre  = group.iloc[max(0, idx - n_windows):idx]['f1'].mean()
+            post = group.iloc[idx + 1: idx + 1 + n_windows]['f1'].mean()
+            if not (np.isnan(pre) or np.isnan(post)):
+                gains.append(post - pre)
+        records.append({
+            'model_type':               model,
+            'retrainer':                retrainer,
+            'exp_type':                 exp_type,
+            'n_retrains':               len(retrain_idxs),
+            'mean_f1_gain_per_retrain': round(np.mean(gains), 4) if gains else np.nan,
+            'positive_retrains':        sum(1 for g in gains if g > 0),
+            'negative_retrains':        sum(1 for g in gains if g < 0),
+            'pct_positive':             round(
+                sum(1 for g in gains if g > 0) / len(gains), 3) if gains else np.nan,
+        })
+    return (pd.DataFrame(records)
+            .sort_values(['model_type', 'mean_f1_gain_per_retrain'], ascending=[True, False])
+            .reset_index(drop=True))
 
 
 # ----- 7. COOLDOWN ANALYSIS ----- #
@@ -421,7 +420,7 @@ def compute_sensitivity_summary(df):
     Use best_configs.csv to find the winner; use this to see the full surface.
     '''
     # causal excluded deliberately — see docstring
-    msm_types = {'msm', 'spy_msm', 'timeout_msm'}
+    msm_types = {'msm', 'spy_msm', 'timeout_msm', 'causal'}
     sub = df[df['exp_type'].isin(msm_types)].copy()
     if sub.empty:
         return pd.DataFrame()
@@ -640,6 +639,95 @@ def compute_regime_retrain_rate(df):
         ascending=[True, False] if 'stress_calm_ratio' in pivot.columns else [True],
     ).reset_index(drop=True)
 
+ROBUSTNESS_WINDOW_DAYS = [45, 60, 90, 120]
+
+def compute_stress_window_robustness(df):
+    '''
+    Re-run the stress-period F1 split for several values of STRESS_WINDOW_DAYS
+    and report whether MSM's stress advantage holds at every width.
+
+    A claim that survives 45/60/90/120 day windows is robust.
+    A claim that only holds at 120 days is sensitive to the definition.
+
+    Output:
+        results/analysis/stress_window_robustness.csv         — full table
+        results/analysis/stress_window_robustness_summary.csv — boolean grid
+    '''
+    records = []
+
+    for window_days in ROBUSTNESS_WINDOW_DAYS:
+        def in_window(date, wd=window_days):
+            return any(
+                (ed - pd.Timedelta(days=wd)) <= date <= (ed + pd.Timedelta(days=wd))
+                for ed in STRESS_EVENTS.values()
+            )
+
+        data = df.copy()
+        data['regime'] = data['date_start'].apply(
+            lambda d: 'stress' if in_window(d) else 'calm'
+        )
+
+        n_stress = int((data['regime'] == 'stress').sum())
+        n_calm   = int((data['regime'] == 'calm').sum())
+
+        pivot = (
+            data.groupby(['model_type', 'retrainer', 'exp_type', 'regime'])
+                .agg(mean_f1=('f1', 'mean'))
+                .reset_index()
+                .pivot_table(
+                    index=['model_type', 'retrainer', 'exp_type'],
+                    columns='regime',
+                    values='mean_f1',
+                )
+                .reset_index()
+        )
+        pivot.columns.name = None
+
+        if 'stress' in pivot.columns and 'calm' in pivot.columns:
+            pivot['f1_stress_minus_calm'] = (pivot['stress'] - pivot['calm']).round(4)
+
+        pivot['stress_window_days'] = window_days
+        pivot['n_stress_windows']   = n_stress
+        pivot['n_calm_windows']     = n_calm
+        records.append(pivot)
+
+    full = pd.concat(records, ignore_index=True)
+
+    # Build the boolean robustness summary: does each MSM-family config beat
+    # the best static baseline at every window width?
+    msm_set      = {'msm', 'spy_msm', 'timeout_msm', 'causal'}
+    summary_rows = []
+
+    for (model, exp), grp in full.groupby(['model_type', 'exp_type']):
+        if exp not in msm_set:
+            continue
+        for wd in ROBUSTNESS_WINDOW_DAYS:
+            msm_row = grp[grp['stress_window_days'] == wd]
+            if msm_row.empty or 'f1_stress_minus_calm' not in msm_row.columns:
+                continue
+            msm_delta = msm_row['f1_stress_minus_calm'].max()
+
+            static_rows = full[
+                (full['model_type'] == model)
+                & (full['exp_type'] == 'static')
+                & (full['stress_window_days'] == wd)
+            ]
+            if static_rows.empty or 'f1_stress_minus_calm' not in static_rows.columns:
+                continue
+            static_delta = static_rows['f1_stress_minus_calm'].max()
+
+            summary_rows.append({
+                'model_type':              model,
+                'exp_type':                exp,
+                'stress_window_days':      wd,
+                'msm_f1_stress_delta':     round(msm_delta, 4),
+                'static_f1_stress_delta':  round(static_delta, 4),
+                'msm_beats_static':        bool(msm_delta > static_delta),
+            })
+
+    summary = pd.DataFrame(summary_rows)
+    return full, summary
+
 
 # ----- MAIN ----- #
 
@@ -750,6 +838,23 @@ def main():
             regime_rate[['model_type', 'retrainer', 'exp_type', 'retrain_rate_stress', 'retrain_rate_calm', 'stress_calm_ratio']]
             .head(10).to_string(index=False)
         )
+        
+    # 13. stress window robustness
+    robustness_full, robustness_summary = compute_stress_window_robustness(df)
+    robustness_full.to_csv(
+        'results/analysis/stress_window_robustness.csv', index=False
+    )
+    if not robustness_summary.empty:
+        robustness_summary.to_csv(
+            'results/analysis/stress_window_robustness_summary.csv', index=False
+        )
+        print('\n=== Stress Window Robustness (MSM beats static at each width?) ===')
+        pivot = robustness_summary.pivot_table(
+            index=['model_type', 'exp_type'],
+            columns='stress_window_days',
+            values='msm_beats_static',
+        )
+        print(pivot.to_string())
 
     print('\nAll outputs written to results/analysis/')
 

@@ -226,7 +226,12 @@ def section_detection_latency(lines):
     lines.append(
         '  Latency = number of rolling windows between stress event onset and the\n'
         '  first retrain triggered by that strategy. Lower is better.\n'
-        '  A strategy that never triggers is marked detected=False.'
+        '  A strategy that never triggers is marked detected=False.\n'
+        '\n'
+        '  NOTE: this section is restricted to signal-driven retrainers\n'
+        '  (MSM family, ADWIN, performance-based). Fixed-schedule and random\n'
+        '  retrainers are excluded — their "detection" is timing, not capability,\n'
+        '  and including them gives misleading rankings.'
     )
 
     df = _load('detection_latency.csv')

@@ -22,6 +22,7 @@ Usage
 '''
 
 import os
+import sys
 import warnings
 import numpy as np
 import pandas as pd
@@ -30,6 +31,9 @@ matplotlib.use('Agg')   # non-interactive backend — safe for headless runs
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.colors import TwoSlopeNorm
+
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 
@@ -370,9 +374,10 @@ def plot_f1_over_time():
     )
 
     # stress event shading
+    from analysis import STRESS_EVENTS, STRESS_WINDOW_DAYS
     STRESS = {
-        'covid_crash':    ('2020-02-20', 120),
-        'fed_hikes_2022': ('2022-03-16', 120),
+        name: (str(date.date()), STRESS_WINDOW_DAYS)
+        for name, date in STRESS_EVENTS.items()
     }
 
     for model, group in df.groupby('model_type'):

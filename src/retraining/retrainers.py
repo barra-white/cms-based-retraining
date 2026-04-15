@@ -416,6 +416,85 @@ class StaticRetrainer(BaseRetrainer):
 
 
 
+class StaticRollingBinsRetrainer(BaseRetrainer):
+    '''
+    Critical control baseline. Same as StaticRetrainer except bin edges
+    are recomputed every window from the current training data.
+
+    Purpose: isolate the contribution of bin recalibration vs model
+    retraining. If MSM only beats Static because of stale bins (not
+    because of stale models), this baseline will close the gap and
+    expose the issue. If MSM still beats this baseline, the model
+    update itself is doing meaningful work — which is the actual
+    thesis claim.
+
+    Implementation note: we override run() rather than just should_retrain()
+    because the standard run() loop only refreezes bins on retrain, and
+    StaticRollingBinsRetrainer.should_retrain() returns False — so bins
+    would never be refreshed under the default loop.
+    '''
+    def should_retrain(self, w, **kwargs):
+        return False
+
+    def run(self, all_graphs):
+        self.results             = []
+        self.last_retrain_window = -999
+        self.best_params         = None
+        self.bin_edges           = None
+        self._reset_run_state()
+        model = None
+
+        for w, g in enumerate(all_graphs):
+            train_start = g['train_start_idx']
+            train_end   = g['train_end_idx']
+            test_start  = train_end
+            test_end    = test_start + self.step
+
+            if test_end > len(self.df):
+                continue
+
+            y_r_train = self._impute_target(self.df[self.target].iloc[train_start:train_end].values)
+            y_r_test  = self._impute_target(self.df[self.target].iloc[test_start:test_end].values)
+
+            # ALWAYS refresh bin edges on the current training window
+            self.freeze_bin_edges(y_r_train)
+
+            # Train model only at window 0 (and never again)
+            if w == 0 or model is None:
+                X_train = self._impute(
+                    self.df[self.feature_cols].iloc[train_start:train_end].values
+                )
+                y_train = self.apply_bins(y_r_train)
+                model   = self.run_grid_search(X_train, y_train, warm=False)
+                self.last_retrain_window = w
+
+            X_test = self._impute(self.df[self.feature_cols].iloc[test_start:test_end].values)
+            y_test = self.apply_bins(y_r_test)
+            f1, directional_acc, pred, y_true = self.evaluate(model, X_test, y_test)
+
+            self.results.append({
+                'window':                w + 1,
+                'date_start':            g['date_start'],
+                'date_end':              g['date_end'],
+                'total_edges':           len(g['edges']),
+                'retrain_triggered':     False,
+                'signal_fired':          False,
+                'cooldown_active':       False,
+                'windows_since_retrain': w - self.last_retrain_window,
+                'f1':                    round(f1, 4),
+                'directional_acc':       round(directional_acc, 4),
+                'y_true':                _to_json(y_true.tolist()),
+                'y_pred':                _to_json(pred.tolist()),
+                'best_params':           _to_json(self.best_params),
+                'graph_msm':             None,
+                'unstable_edges':        None,
+                'active_features':       None,
+            })
+
+        return pd.DataFrame(self.results)
+
+
+
 class FixedScheduleRetrainer(BaseRetrainer):
     '''
     Retrain at fixed intervals (e.g. every 5 windows), regardless of MSM signal.
@@ -645,32 +724,27 @@ class MSMRetrainer(BaseRetrainer):
 
 class SPYFocusedMSMRetrainer(MSMRetrainer):
     '''
-    Variant of MSM retrainer that focuses on edges connected to SPY.
-    Retrain whenever mean MSM of SPY-connected edges drops below tau_1,
-    with stage 2 confirmation using expanded lookback and tau_2.
+    Variant of MSM retrainer that focuses on edges connected to a target node
+    (typically SPY). Triggers on stage-1 / stage-2 thresholds applied to the
+    mean MSM of edges *into* the target.
     '''
-    def __init__(self, *args, spy_idx=10, **kwargs):
+    def __init__(self, *args, target_idx=0, **kwargs):
         super().__init__(*args, **kwargs)
-        self.spy_idx = spy_idx # index of SPY_lr in feature_cols, used to identify SPY-connected edges in the graph (10)
-        
+        self.target_idx = target_idx   # graph-index of target; SPY_lr is at index 0
+
     def compute_graph_msm(self, all_graphs, w):
-        '''
-        Computes mean MSM of edges where SPY is the target node,
-        across the last `lookback` windows.
-        Returns (mean_msm, edge_scores dict).
-        '''
         start          = max(0, w - self.lookback + 1)
         recent_windows = all_graphs[start: w + 1]
         n              = len(recent_windows)
 
         all_edges = set()
         for g in recent_windows:
-            all_edges |= {e for e in g['edges'] if e[1] == self.spy_idx}
+            all_edges |= {e for e in g['edges'] if e[1] == self.target_idx}
 
         if not all_edges:
-            # SPY having no incoming edges is a valid sparse-graph state,
-            # not a signal of causal instability.
-            return 0.0, {}
+            # No incoming edges to target across the lookback. Returning 1.0
+            # treats this as 'maximally stable' — i.e., do NOT trigger a retrain.
+            return 1.0, {}
 
         edge_scores = {
             e: sum(1 for g in recent_windows if e in g['edges']) / n
@@ -721,11 +795,32 @@ class CausalFeatureRetrainer(MSMRetrainer):
     '''
     MSM-triggered retraining + causal feature selection.
     Only features with a causal edge into SPY are used for training.
+
+    NOTE on indexing: the graph in `all_graphs.pkl` indexes variables in
+    standardized_data.csv column order, which INCLUDES the target SPY_lr.
+    `all_features` is the list passed from experiment.py — which EXCLUDES
+    SPY_lr (since it is the target). Mapping graph indices directly to
+    all_features is therefore off by one and silently wrong.
+    The fix: use variable names instead of indices.
     '''
-    def __init__(self, *args, spy_idx=10, all_features=None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        target_name='SPY_lr',
+        graph_var_names=None,
+        all_features=None,
+        **kwargs
+    ):
         super().__init__(*args, **kwargs)
-        self.spy_idx      = spy_idx
-        self.all_features = all_features or self.feature_cols
+        if graph_var_names is None:
+            raise ValueError(
+                'CausalFeatureRetrainer requires graph_var_names — the full list '
+                'of variable names in graph index order, including the target.'
+            )
+        self.target_name      = target_name
+        self.graph_var_names  = list(graph_var_names)
+        self.target_idx       = self.graph_var_names.index(target_name)
+        self.all_features     = list(all_features) if all_features else list(self.feature_cols)
         self._active_features = list(self.all_features)
 
     def _reset_run_state(self):
@@ -733,14 +828,13 @@ class CausalFeatureRetrainer(MSMRetrainer):
         self._active_features = list(self.all_features)
 
     def _get_feature_cols_for_window(self, g):
-        """Select only SPY-parent features for this window.
-        Reset best_params if the feature set changes"""
-        active_indices = self._get_spy_parent_indices(g)
-        new_active     = [self.all_features[idx] for idx in active_indices]
-
+        '''Select only causal-parent features of the target for this window.
+        Falls back to all features if the graph has no parents for the target.
+        Resets best_params if the feature set changes (cached hyperparameters
+        are invalid for a different feature column count).'''
+        new_active = self._get_target_parent_features(g)
         if new_active != self._active_features:
             self.best_params = None
-
         self._active_features = new_active
         return self._active_features
 
@@ -749,15 +843,24 @@ class CausalFeatureRetrainer(MSMRetrainer):
         fields['active_features'] = _to_json(self._active_features)
         return fields
 
-    def _get_spy_parent_indices(self, g):
-        spy_parents = {
+    def _get_target_parent_features(self, g):
+        '''Return the list of feature NAMES that are causal parents of the target
+        in this window's graph. Filters to features that exist in self.all_features
+        (i.e. excludes the target itself, which is never a feature).'''
+        # Step 1: get graph indices that point into the target
+        parent_graph_indices = {
             e[0] for e in g['edges']
-            if e[1] == self.spy_idx and e[0] != self.spy_idx
+            if e[1] == self.target_idx and e[0] != self.target_idx
         }
-        if not spy_parents:
-            return list(range(len(self.all_features)))
-        feature_indices = sorted([
-            idx for idx in spy_parents
-            if 0 <= idx < len(self.all_features)
-        ])
-        return feature_indices if feature_indices else list(range(len(self.all_features)))
+        # Step 2: convert graph indices to variable names
+        parent_names = [
+            self.graph_var_names[idx]
+            for idx in parent_graph_indices
+            if 0 <= idx < len(self.graph_var_names)
+        ]
+        # Step 3: filter to features the model actually uses
+        active = [name for name in parent_names if name in self.all_features]
+
+        # Fallback: if no causal parents found, use all features
+        # (otherwise we'd train on zero columns)
+        return sorted(active) if active else list(self.all_features)

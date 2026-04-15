@@ -5,6 +5,18 @@ import traceback
 import numpy as np
 import pandas as pd
 
+STRESS_EVENTS = {
+    'covid_crash':    pd.Timestamp('2020-02-20'),
+    'fed_hikes_2022': pd.Timestamp('2022-03-16'),
+}
+STRESS_WINDOW_DAYS = 60
+
+def _classify_regime(date):
+    return 'stress' if any(
+        (ed - pd.Timedelta(days=STRESS_WINDOW_DAYS)) <= date <= (ed + pd.Timedelta(days=STRESS_WINDOW_DAYS))
+        for ed in STRESS_EVENTS.values()
+    ) else 'calm'
+
 from retrainers import(
     StaticRetrainer,
     FixedScheduleRetrainer,
@@ -14,7 +26,8 @@ from retrainers import(
     MSMRetrainer,
     SPYFocusedMSMRetrainer,
     MSMTimeoutRetrainer,
-    CausalFeatureRetrainer
+    CausalFeatureRetrainer,
+    StaticRollingBinsRetrainer
 )
 
 # ----- RUN CONFIG -----
@@ -58,7 +71,10 @@ MODEL_TYPES = ['xgboost', 'lr', 'rf']
 # ----- CONFIG BUILDERS -----
 # static
 def build_static_config():
-    return [("static", StaticRetrainer, {})]
+    configs = []
+    configs += [("static", StaticRetrainer, {})]
+    configs += [("static_rolling_bins", StaticRollingBinsRetrainer, {})]
+    return configs
 
 # fixed schedule
 def build_fixed_schedule_configs():
@@ -85,15 +101,24 @@ def build_adwin_configs():
 def build_random_configs():
     return [('random', RandomRetrainer, {})]
 
-def build_spy_msm_configs():
+def build_spy_msm_configs(target_idx_in_graph):
     configs = []
     for tau_1 in TAU_1_VALUES:
         for tau_2 in TAU_2_VALUES:
             if tau_2 >= tau_1 or abs(tau_1 - tau_2) < 0.04:
                 continue
             for lookback in LOOKBACK:
-                name = f'spy_msm_tau_1_{tau_1}_tau_2_{tau_2}_lb_{lookback}' 
-                configs.append((name, SPYFocusedMSMRetrainer, {'tau_1': tau_1, 'tau_2': tau_2, 'lookback': lookback}))
+                name = f'spy_msm_tau_1_{tau_1}_tau_2_{tau_2}_lb_{lookback}'
+                configs.append((
+                    name,
+                    SPYFocusedMSMRetrainer,
+                    {
+                        'tau_1':      tau_1,
+                        'tau_2':      tau_2,
+                        'lookback':   lookback,
+                        'target_idx': target_idx_in_graph,
+                    }
+                ))
     return configs
 
 def build_timeout_msm_configs():
@@ -166,6 +191,9 @@ def run_experiment(name, cls, kwargs, base_args, all_graphs):
     # tag model type for later analysis
     results['model_type'] = base_args['model_type']
     
+    results['regime'] = results['date'].apply(_classify_regime)
+    results['regime'] = pd.to_datetime(results['date_start']).apply(_classify_regime)  
+    results['stress_windows_days_at_run'] = STRESS_WINDOW_DAYS  
     # save csv immideiately to avoid losing results if experiment crashes later
     results.to_csv(output_file, index=False)
     
@@ -215,6 +243,16 @@ def main():
     print(f'Graph windows: {len(all_graphs)}')
     
     # base args: same for all retrainers
+    graph_var_names = [c for c in df.columns if c != 'Date']
+    TARGET_NAME = 'SPY_lr'
+    if TARGET_NAME not in graph_var_names:
+        raise ValueError(
+            f"Target '{TARGET_NAME}' not found in standardized_data.csv columns. "
+            f"Available: {graph_var_names}"
+        )
+    target_idx_in_graph = graph_var_names.index(TARGET_NAME)
+    print(f"Target '{TARGET_NAME}' is at graph index {target_idx_in_graph}")
+
     base_args_temp = dict(
         df=df,
         feature_cols=feature_cols,
@@ -236,17 +274,27 @@ def main():
         configs += build_adwin_configs()
         configs += build_random_configs()
         configs += build_msm_configs()
-        configs += build_spy_msm_configs()
+        configs += build_spy_msm_configs(target_idx_in_graph)
         configs += build_timeout_msm_configs()
         # Note: CausalFeatureRetrainer needs feature_cols — add after feature_cols is loaded
-        spy_idx = feature_cols.index('SPYlr') if 'SPYlr' in feature_cols else 10
         for tau1 in TAU_1_VALUES:
             for tau2 in TAU_2_VALUES:
-                if tau2 >= tau1 or abs(tau1 - tau2) < 0.04: continue
+                if tau2 >= tau1 or abs(tau1 - tau2) < 0.04:
+                    continue
                 for lookback in LOOKBACK:
-                    configs.append((f'causal_tau_1_{tau1}_tau_2_{tau2}_lb_{lookback}', 
-                    CausalFeatureRetrainer,
-                    {'tau_1': tau1, 'tau_2': tau2, 'lookback': lookback,  'spy_idx': spy_idx, 'all_features': feature_cols}))
+                    name = f'causal_tau_1_{tau1}_tau_2_{tau2}_lb_{lookback}'
+                    configs.append((
+                        name,
+                        CausalFeatureRetrainer,
+                        {
+                            'tau_1':           tau1,
+                            'tau_2':           tau2,
+                            'lookback':        lookback,
+                            'target_name':     TARGET_NAME,
+                            'graph_var_names': graph_var_names,
+                            'all_features':    feature_cols,
+                        }
+                    ))
     else:
         configs += [MSM_DEFAULT]
         print(f'DEV MODE: Running default configurations for each retrainer with {len(configs)} retrainer configurations...')
