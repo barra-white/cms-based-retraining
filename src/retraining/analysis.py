@@ -1,23 +1,11 @@
 '''
-analysis.py — Post-experiment analysis.
+analysis.py — Post-experiment analysis pipeline.
 
-Computes and saves to results/analysis/:
-    1.  overall_summary.csv      — per-(model, retrainer) mean F1, dir-acc, retrain count
-    2.  per_class_f1.csv         — per-class F1 to surface class imbalance from stale bins
-    3.  detection_latency.csv    — calendar-day / window latency to first retrain after each stress event
-    4.  false_positive_rate.csv  — fraction of retrains outside known stress windows
-    5.  best_configs.csv         — top-3 configs per (model_type, exp_type) by mean F1
-    6.  retrain_efficiency.csv   — pre/post F1 delta per retrain event
-    7.  cooldown_analysis.csv    — how often cooldown suppresses a valid signal, by strategy
-    8.  stress_period_f1.csv     — F1 split into stress vs. calm market regimes
-    9.  sensitivity_summary.csv  — mean F1 vs tau_1, tau_2, lookback for MSM-family retrainers
-    10. causal_feature_usage.csv — most frequently selected features by CausalFeatureRetrainer
-    11. friedman_ranks.csv       — per-window strategy ranks for Friedman / Nemenyi test
-    12. regime_retrain_rate.csv  — retrains-per-window split by stress vs. calm regime
+Run after experiment.py completes. Produces CSVs to results/analysis/.
 
-Input:  results/experiments/<model_name>/<retraining_type>/*_results.csv
-        (or results/experiments/all_results.csv if the aggregate exists)
-Output: results/analysis/ (12 CSVs + friedman_test.csv)
+Usage:
+    cd src/retraining
+    python analysis.py
 '''
 
 import ast
@@ -32,122 +20,103 @@ from scipy.stats import friedmanchisquare
 from sklearn.metrics import f1_score
 
 
-# ----- STRESS EVENTS ----- #
-# Add new events here — all downstream analyses pick them up automatically.
-# Set STRESS_WINDOW_DAYS to define how wide a ±window counts as a true positive.
+# ── STRESS EVENTS ──
+# Single source of truth. All downstream code reads from here.
+# Add new events here — everything picks them up automatically.
 
 STRESS_EVENTS = {
-    'covid_crash':    pd.Timestamp('2020-02-20'),
-    'fed_hikes_2022': pd.Timestamp('2022-03-16'),
+    'covid_crash':        pd.Timestamp('2020-02-20'),
+    'fed_hikes_2022':     pd.Timestamp('2022-03-16'),
+    'carry_trade_unwind': pd.Timestamp('2024-08-05'),
 }
-STRESS_WINDOW_DAYS = 60  # ±3 calendar months = one financial quarter
+STRESS_WINDOW_DAYS = 60   # ±60 calendar days around each event
 
+ROBUSTNESS_WINDOW_DAYS = [45, 60, 90, 120]
 
-# ----- EXPERIMENT TYPE PREFIXES ----- #
-# Order matters — longer prefixes must come first to avoid 'msm' matching 'spy_msm'
-
+# ── EXPERIMENT TYPE RESOLUTION ──
+# Longer prefixes first to avoid 'msm' matching 'spy_msm'.
 EXP_TYPE_PREFIXES = [
     'spy_msm', 'timeout_msm', 'msm', 'causal',
     'fixed', 'perf', 'adwin', 'random', 'static',
 ]
 
+MSM_TYPES      = {'msm', 'spy_msm', 'timeout_msm', 'causal'}
+BASELINE_TYPES = {'static', 'random', 'fixed'}
 
-# ----- HELPERS ----- #
+# Signal-driven strategies (used to filter detection latency).
+SIGNAL_DRIVEN = {'msm', 'spy_msm', 'timeout_msm', 'causal', 'adwin', 'perf'}
+
+
+# ── HELPERS ──
 
 def get_experiment_type(name):
-    '''Map a retrainer name string to a short experiment-type label.'''
     for prefix in EXP_TYPE_PREFIXES:
         if name.startswith(prefix):
             return prefix
     return 'other'
 
 
-def in_any_window(date):
-    '''Return True if date falls inside any known stress window.'''
+def in_stress_window(date):
     return any(
-        (event_date - pd.Timedelta(days=STRESS_WINDOW_DAYS))
-        <= date
-        <= (event_date + pd.Timedelta(days=STRESS_WINDOW_DAYS))
-        for event_date in STRESS_EVENTS.values()
+        (ev - pd.Timedelta(days=STRESS_WINDOW_DAYS))
+        <= date <=
+        (ev + pd.Timedelta(days=STRESS_WINDOW_DAYS))
+        for ev in STRESS_EVENTS.values()
     )
 
 
-# ----- LOADING ----- #
+# ── LOADING ──
 
 def load_results(path='results/experiments/all_results.csv'):
-    '''
-    Load the combined results CSV.
-
-    Falls back to globbing all per-experiment CSVs under the nested
-    results/experiments/<model_name>/<retraining_type>/ structure
-    if the aggregate file is missing (e.g. experiment.py crashed before
-    the final concat, or results were never merged).
-
-    Partial-run safety: also checks for all_results_partial.csv so
-    analysis can be run mid-experiment without waiting for completion.
-    '''
-    partial_path = os.path.join(os.path.dirname(path), 'all_results_partial.csv')
+    partial = os.path.join(os.path.dirname(path), 'all_results_partial.csv')
 
     if os.path.exists(path):
         df = pd.read_csv(path, parse_dates=['date_start', 'date_end'])
-    elif os.path.exists(partial_path):
-        print(f'Warning: using partial results from {partial_path}')
-        df = pd.read_csv(partial_path, parse_dates=['date_start', 'date_end'])
+    elif os.path.exists(partial):
+        print(f'Warning: using partial results from {partial}')
+        df = pd.read_csv(partial, parse_dates=['date_start', 'date_end'])
     else:
         parts = glob.glob('results/experiments/*/*/*_results.csv')
-        # explicitly exclude both aggregate files — all_results_partial.csv is a
-        # crash-recovery artefact and may contain only a subset of models
         parts = [p for p in parts if os.path.basename(p) not in
                  ('all_results.csv', 'all_results_partial.csv')]
         if not parts:
-            raise FileNotFoundError(
-                f"No results at '{path}' and no per-experiment CSVs found. "
-                "Run experiment.py first."
-            )
+            raise FileNotFoundError("No results found. Run experiment.py first.")
         df = pd.concat(
             [pd.read_csv(p, parse_dates=['date_start', 'date_end']) for p in parts],
             ignore_index=True,
         )
 
-    # validate required columns are present
-    required_cols = {'model_type', 'retrainer', 'f1', 'directional_acc',
-                     'retrain_triggered', 'signal_fired', 'cooldown_active',
-                     'date_start', 'window', 'y_true', 'y_pred'}
-    missing = required_cols - set(df.columns)
-    if missing:
-        raise ValueError(
-            f"Results DataFrame is missing expected columns: {missing}. "
-            "Re-run experiment.py to regenerate results."
-        )
-
-    # parse stored JSON/list columns — only convert if still a string
+    # Parse stored JSON columns
     for col in ('y_true', 'y_pred'):
         if col in df.columns and df[col].dtype == object:
             df[col] = df[col].apply(ast.literal_eval)
 
-    # ensure boolean columns are typed correctly after CSV round-trip
+    # Ensure boolean columns — CSV round-trip turns True/False into strings.
+    # str.astype(bool) makes 'False' → True (non-empty string is truthy).
+    # Must map explicitly.
     for col in ('retrain_triggered', 'signal_fired', 'cooldown_active'):
         if col in df.columns:
-            df[col] = df[col].astype(bool)
+            df[col] = (
+                df[col].astype(str).str.strip().str.lower()
+                .map({'true': True, 'false': False, '1': True, '0': False,
+                      '1.0': True, '0.0': False})
+                .fillna(False)
+            )
 
     df['exp_type'] = df['retrainer'].apply(get_experiment_type)
     return df
 
 
-# ----- 1. OVERALL SUMMARY ----- #
+# ── 1. OVERALL SUMMARY ──
 
-def compute_overall_summary(df):
-    '''
-    Per-(model_type, retrainer) mean F1, directional accuracy, and retrain count.
-    Also reports signals_fired and cooldowns_hit to diagnose cooldown behaviour.
-    '''
+def overall_summary(df):
     return (
         df.groupby(['model_type', 'retrainer', 'exp_type'])
         .agg(
             mean_f1           = ('f1', 'mean'),
             std_f1            = ('f1', 'std'),
             median_f1         = ('f1', 'median'),
-            mean_dir_accuracy = ('directional_acc', 'mean'),
+            mean_dir_acc      = ('directional_acc', 'mean'),
             retrains          = ('retrain_triggered', 'sum'),
             signals_fired     = ('signal_fired', 'sum'),
             cooldowns_hit     = ('cooldown_active', 'sum'),
@@ -159,144 +128,93 @@ def compute_overall_summary(df):
     )
 
 
-# ----- 2. PER-CLASS F1 ----- #
+# ── 2. PER-CLASS F1 ──
 
-def compute_per_class_f1(df):
-    '''
-    Aggregate y_true/y_pred across all windows per (model, retrainer),
-    then compute per-class F1. Low F1 on any single class indicates class
-    imbalance caused by stale bin edges not being refreshed often enough.
-    Classes: 0 = down, 1 = neutral, 2 = up.
-    '''
+def per_class_f1(df):
     CLASS_NAMES = {0: 'down', 1: 'neutral', 2: 'up'}
     records = []
-    for (model, retrainer), group in df.groupby(['model_type', 'retrainer']):
-        # vectorised: sum() on a list-of-lists flattens without iterrows
-        y_true_all = sum(group['y_true'].tolist(), [])
-        y_pred_all = sum(group['y_pred'].tolist(), [])
-        scores = f1_score(y_true_all, y_pred_all, average=None, zero_division=0)
-        for cls_idx, score in enumerate(scores):
+    for (model, retrainer), grp in df.groupby(['model_type', 'retrainer']):
+        y_true = sum(grp['y_true'].tolist(), [])
+        y_pred = sum(grp['y_pred'].tolist(), [])
+        scores = f1_score(y_true, y_pred, average=None, zero_division=0)
+        for cls, score in enumerate(scores):
             records.append({
-                'model_type': model,
-                'retrainer':  retrainer,
-                'exp_type':   get_experiment_type(retrainer),
-                'class':      cls_idx,
-                'class_name': CLASS_NAMES.get(cls_idx, str(cls_idx)),
-                'f1':         round(float(score), 4),
+                'model_type': model, 'retrainer': retrainer,
+                'exp_type': get_experiment_type(retrainer),
+                'class': cls, 'class_name': CLASS_NAMES.get(cls, str(cls)),
+                'f1': round(float(score), 4),
             })
     return pd.DataFrame(records)
 
 
-# ----- 3. DETECTION LATENCY ----- #
-SIGNAL_DRIVEN_TYPES = {'msm', 'spy_msm', 'timeout_msm', 'causal', 'adwin', 'performance', 'perf'}
+# ── 3. DETECTION LATENCY (signal-driven only) ──
 
-def compute_detection_latency(df):
-    '''
-    For each (model_type, retrainer, stress_event): find the first retrain
-    on or after the event date. Latency is reported in both calendar days
-    and rolling windows (1 window ≈ 21 trading days).
-
-    detected=False means the strategy never retrains after the event onset
-    — a missed regime shift.
-
-    NOTE: only signal-driven retrainers are included. Fixed-schedule, static,
-    and random retrainers fire by timing or chance, not detection — including
-    them here would be misleading.
-    '''
+def detection_latency(df):
     records = []
-    df_signal = df[df['exp_type'].isin(SIGNAL_DRIVEN_TYPES)].copy()
-    retrains  = df_signal[df_signal['retrain_triggered']].copy()
+    sig_df   = df[df['exp_type'].isin(SIGNAL_DRIVEN)].copy()
+    retrains = sig_df[sig_df['retrain_triggered']].copy()
 
-    for (model, retrainer), group in retrains.groupby(['model_type', 'retrainer']):
-        exp_type = get_experiment_type(retrainer)
+    for (model, retrainer), grp in retrains.groupby(['model_type', 'retrainer']):
+        exp = get_experiment_type(retrainer)
         for event_name, event_date in STRESS_EVENTS.items():
-            after = group[group['date_start'] >= event_date]
+            after = grp[grp['date_start'] >= event_date]
             if after.empty:
                 records.append({
-                    'model_type':      model,
-                    'retrainer':       retrainer,
-                    'exp_type':        exp_type,
-                    'event':           event_name,
-                    'event_date':      event_date.date(),
-                    'first_retrain':   pd.NaT,
-                    'latency_days':    np.nan,
-                    'latency_windows': np.nan,
-                    'detected':        False,
+                    'model_type': model, 'retrainer': retrainer, 'exp_type': exp,
+                    'event': event_name, 'event_date': event_date.date(),
+                    'first_retrain': pd.NaT, 'latency_days': np.nan,
+                    'latency_windows': np.nan, 'detected': False,
                 })
             else:
-                first    = after.iloc[0]
-                lat_days = (first['date_start'] - event_date).days
+                first = after.iloc[0]
+                lat   = (first['date_start'] - event_date).days
                 records.append({
-                    'model_type':      model,
-                    'retrainer':       retrainer,
-                    'exp_type':        exp_type,
-                    'event':           event_name,
-                    'event_date':      event_date.date(),
-                    'first_retrain':   first['date_start'].date(),
-                    'latency_days':    lat_days,
-                    'latency_windows': round(lat_days / 21, 1),
-                    'detected':        True,
+                    'model_type': model, 'retrainer': retrainer, 'exp_type': exp,
+                    'event': event_name, 'event_date': event_date.date(),
+                    'first_retrain': first['date_start'].date(),
+                    'latency_days': lat, 'latency_windows': round(lat / 21, 1),
+                    'detected': True,
                 })
     return pd.DataFrame(records)
 
 
-# ----- 4. FALSE POSITIVE RATE ----- #
+# ── 4. FALSE POSITIVE RATE ──
 
-def compute_false_positive_rate(df):
-    '''
-    False positive = retrain triggered outside all known stress windows.
-    Precision = TP / (TP + FP).
-
-    A strategy that retrains constantly will have high TP but also high FP.
-    The precision column penalises that — MSM should score higher precision
-    than FixedSchedule or Random because it is selective.
-    '''
+def false_positive_rate(df):
     retrains = df[df['retrain_triggered']].copy()
-    retrains['in_stress_window'] = retrains['date_start'].apply(in_any_window)
-
+    if retrains.empty:
+        return pd.DataFrame(columns=[
+            'model_type', 'retrainer', 'exp_type', 'total_retrains',
+            'true_positives', 'false_positives', 'fpr', 'precision'])
+    retrains['in_stress'] = retrains['date_start'].apply(in_stress_window)
     records = []
-    for (model, retrainer), group in retrains.groupby(['model_type', 'retrainer']):
-        total = len(group)
-        tp    = int(group['in_stress_window'].sum())
+    for (model, retrainer), grp in retrains.groupby(['model_type', 'retrainer']):
+        total = len(grp)
+        tp    = int(grp['in_stress'].sum())
         fp    = total - tp
         records.append({
-            'model_type':          model,
-            'retrainer':           retrainer,
-            'exp_type':            get_experiment_type(retrainer),
-            'total_retrains':      total,
-            'true_positives':      tp,
-            'false_positives':     fp,
-            'false_positive_rate': round(fp / total, 4) if total else np.nan,
-            'precision':           round(tp / total, 4) if total else np.nan,
+            'model_type': model, 'retrainer': retrainer,
+            'exp_type': get_experiment_type(retrainer),
+            'total_retrains': total, 'true_positives': tp, 'false_positives': fp,
+            'fpr': round(fp / total, 4) if total else np.nan,
+            'precision': round(tp / total, 4) if total else np.nan,
         })
     return pd.DataFrame(records)
 
 
-# ----- 5. BEST CONFIGS ----- #
+# ── 5. BEST CONFIGS ──
 
-def compute_best_configs(df, top_k=3):
-    '''
-    For each (model_type, exp_type), the top_k retrainer configs ranked by
-    mean F1. Directly shows which tau_1/tau_2/lookback combination won the
-    MSM sensitivity sweep, and the best interval for FixedSchedule, etc.
-    '''
+def best_configs(df, top_k=3):
     summary = (
         df.groupby(['model_type', 'exp_type', 'retrainer'])
-        .agg(
-            mean_f1           = ('f1', 'mean'),
-            std_f1            = ('f1', 'std'),
-            mean_dir_accuracy = ('directional_acc', 'mean'),
-            retrains          = ('retrain_triggered', 'sum'),
-            windows           = ('f1', 'count'),
-        )
-        .round(4)
-        .reset_index()
+        .agg(mean_f1=('f1', 'mean'), std_f1=('f1', 'std'),
+             mean_dir_acc=('directional_acc', 'mean'),
+             retrains=('retrain_triggered', 'sum'), windows=('f1', 'count'))
+        .round(4).reset_index()
     )
     summary['rank'] = (
-        summary
-        .groupby(['model_type', 'exp_type'])['mean_f1']
-        .rank(ascending=False, method='first')
-        .astype(int)
+        summary.groupby(['model_type', 'exp_type'])['mean_f1']
+        .rank(ascending=False, method='first').astype(int)
     )
     return (
         summary[summary['rank'] <= top_k]
@@ -305,127 +223,87 @@ def compute_best_configs(df, top_k=3):
     )
 
 
-# ----- 6. RETRAIN EFFICIENCY ----- #
+# ── 6. RETRAIN EFFICIENCY ──
 
-def compute_retrain_efficiency(df, n_windows=3):
+def retrain_efficiency(df, n_windows=3):
     records = []
-    for (model, retrainer), group in df.groupby(['model_type', 'retrainer']):
-        group = group.sort_values('window').reset_index(drop=True)
-        exp_type = group['exp_type'].iloc[0] if 'exp_type' in group.columns else 'unknown'
-        retrain_idxs = group.index[group['retrain_triggered'].astype(bool)].tolist()
+    for (model, retrainer), grp in df.groupby(['model_type', 'retrainer']):
+        grp = grp.sort_values('window').reset_index(drop=True)
+        exp = get_experiment_type(retrainer)
+        retrain_idxs = grp.index[grp['retrain_triggered']].tolist()
         gains = []
         for idx in retrain_idxs:
-            pre  = group.iloc[max(0, idx - n_windows):idx]['f1'].mean()
-            post = group.iloc[idx + 1: idx + 1 + n_windows]['f1'].mean()
+            pre  = grp.iloc[max(0, idx - n_windows):idx]['f1'].mean()
+            post = grp.iloc[idx + 1: idx + 1 + n_windows]['f1'].mean()
             if not (np.isnan(pre) or np.isnan(post)):
                 gains.append(post - pre)
+        n_pos = sum(1 for g in gains if g > 0)
         records.append({
-            'model_type':               model,
-            'retrainer':                retrainer,
-            'exp_type':                 exp_type,
-            'n_retrains':               len(retrain_idxs),
-            'mean_f1_gain_per_retrain': round(np.mean(gains), 4) if gains else np.nan,
-            'positive_retrains':        sum(1 for g in gains if g > 0),
-            'negative_retrains':        sum(1 for g in gains if g < 0),
-            'pct_positive':             round(
-                sum(1 for g in gains if g > 0) / len(gains), 3) if gains else np.nan,
+            'model_type': model, 'retrainer': retrainer, 'exp_type': exp,
+            'n_retrains': len(retrain_idxs),
+            'mean_f1_gain': round(np.mean(gains), 4) if gains else np.nan,
+            'positive_retrains': n_pos,
+            'negative_retrains': len(gains) - n_pos,
+            'pct_positive': round(n_pos / len(gains), 3) if gains else np.nan,
         })
-    return (pd.DataFrame(records)
-            .sort_values(['model_type', 'mean_f1_gain_per_retrain'], ascending=[True, False])
-            .reset_index(drop=True))
+    return pd.DataFrame(records).sort_values(
+        ['model_type', 'mean_f1_gain'], ascending=[True, False]
+    ).reset_index(drop=True)
 
 
-# ----- 7. COOLDOWN ANALYSIS ----- #
+# ── 7. COOLDOWN ANALYSIS ──
 
-def compute_cooldown_analysis(df):
-    '''
-    How often does the cooldown mechanism suppress a real signal?
-
-    suppression_rate = (signals_fired - retrains_triggered) / signals_fired
-
-    High suppression_rate → cooldown too long; many signals are being blocked.
-    Near-zero suppression_rate → strategy rarely fires consecutive signals
-    (threshold may be too conservative).
-
-    This directly informs the cooldown hyperparameter choice in the thesis.
-    '''
+def cooldown_analysis(df):
     records = []
-    for (model, retrainer), group in df.groupby(['model_type', 'retrainer']):
-        signals    = int(group['signal_fired'].sum())
-        retrains   = int(group['retrain_triggered'].sum())
+    for (model, retrainer), grp in df.groupby(['model_type', 'retrainer']):
+        signals    = int(grp['signal_fired'].sum())
+        retrains   = int(grp['retrain_triggered'].sum())
         suppressed = signals - retrains
         records.append({
-            'model_type':          model,
-            'retrainer':           retrainer,
-            'exp_type':            get_experiment_type(retrainer),
-            'signals_fired':       signals,
-            'retrains_triggered':  retrains,
+            'model_type': model, 'retrainer': retrainer,
+            'exp_type': get_experiment_type(retrainer),
+            'signals_fired': signals, 'retrains_triggered': retrains,
             'cooldown_suppressed': suppressed,
-            'suppression_rate':    round(suppressed / signals, 4) if signals else np.nan,
+            'suppression_rate': round(suppressed / signals, 4) if signals else np.nan,
         })
     return pd.DataFrame(records)
 
 
-# ----- 8. STRESS PERIOD F1 ----- #
+# ── 8. STRESS PERIOD F1 ──
 
-def compute_stress_period_f1(df):
-    '''
-    Split windows into stress / calm regimes and compare mean F1.
-
-    f1_stress_minus_calm > 0 → strategy adapts faster than the market moves.
-    f1_stress_minus_calm < 0 → strategy is being disrupted by the very events
-    it is supposed to detect (common for strategies that retrain too late).
-
-    This is one of the core thesis comparisons: MSM should show less F1
-    degradation during stress periods than static or fixed-schedule baselines.
-    '''
+def stress_period_f1(df):
     data = df.copy()
     data['regime'] = data['date_start'].apply(
-        lambda d: 'stress' if in_any_window(d) else 'calm'
+        lambda d: 'stress' if in_stress_window(d) else 'calm'
     )
-    result = (
+    agg = (
         data.groupby(['model_type', 'retrainer', 'exp_type', 'regime'])
         .agg(mean_f1=('f1', 'mean'), std_f1=('f1', 'std'), n=('f1', 'count'))
-        .round(4)
-        .reset_index()
+        .round(4).reset_index()
     )
-    pivot = result.pivot_table(
+    pivot = agg.pivot_table(
         index=['model_type', 'retrainer', 'exp_type'],
-        columns='regime',
-        values=['mean_f1', 'n'],
+        columns='regime', values=['mean_f1', 'n'],
     )
     pivot.columns = ['_'.join(c).strip() for c in pivot.columns]
-    pivot['f1_stress_minus_calm'] = (
-        pivot.get('mean_f1_stress', np.nan) - pivot.get('mean_f1_calm', np.nan)
-    ).round(4)
+    if 'mean_f1_stress' in pivot.columns and 'mean_f1_calm' in pivot.columns:
+        pivot['f1_stress_minus_calm'] = (
+            pivot['mean_f1_stress'] - pivot['mean_f1_calm']
+        ).round(4)
     return (
         pivot.reset_index()
         .sort_values(['model_type', 'f1_stress_minus_calm'], ascending=[True, False])
     )
 
 
-# ----- 9. SENSITIVITY SUMMARY ----- #
+# ── 9. SENSITIVITY SUMMARY ──
 
-def compute_sensitivity_summary(df):
-    '''
-    For MSM, SPY-MSM, and timeout_msm retrainers: parse tau_1, tau_2, lookback
-    from the retrainer name string and report mean F1 per
-    (model_type, exp_type, tau_1, tau_2, lookback).
-
-    CausalFeatureRetrainer is intentionally excluded — it has additional
-    dimensions (spy_idx, all_features) that are not captured in the name
-    and would conflate the sensitivity surface.
-
-    Directly answers: which region of the parameter sweep performs best?
-    Use best_configs.csv to find the winner; use this to see the full surface.
-    '''
-    # causal excluded deliberately — see docstring
-    msm_types = {'msm', 'spy_msm', 'timeout_msm', 'causal'}
-    sub = df[df['exp_type'].isin(msm_types)].copy()
+def sensitivity_summary(df):
+    sub = df[df['exp_type'].isin(MSM_TYPES)].copy()
     if sub.empty:
         return pd.DataFrame()
 
-    def _parse_params(name):
+    def _parse(name):
         t1 = re.search(r'tau_1_([\d.]+)', name)
         t2 = re.search(r'tau_2_([\d.]+)', name)
         lb = re.search(r'lb_(\d+)', name)
@@ -435,428 +313,244 @@ def compute_sensitivity_summary(df):
             'lookback': int(lb.group(1))   if lb else np.nan,
         }
 
-    params = sub['retrainer'].apply(_parse_params).apply(pd.Series)
+    params = sub['retrainer'].apply(_parse).apply(pd.Series)
     sub = pd.concat([sub.reset_index(drop=True), params], axis=1)
 
     return (
         sub.groupby(['model_type', 'exp_type', 'tau_1', 'tau_2', 'lookback'])
-        .agg(
-            mean_f1           = ('f1', 'mean'),
-            std_f1            = ('f1', 'std'),
-            mean_dir_accuracy = ('directional_acc', 'mean'),
-            retrains          = ('retrain_triggered', 'sum'),
-        )
+        .agg(mean_f1=('f1', 'mean'), std_f1=('f1', 'std'),
+             mean_dir_acc=('directional_acc', 'mean'),
+             retrains=('retrain_triggered', 'sum'))
         .round(4)
         .sort_values(['model_type', 'exp_type', 'mean_f1'], ascending=[True, True, False])
         .reset_index()
     )
 
 
-# ----- 10. CAUSAL FEATURE USAGE ----- #
+# ── 10. CAUSAL FEATURE USAGE ──
 
-def compute_causal_feature_usage(df):
-    '''
-    For CausalFeatureRetrainer rows, parse the JSON list in active_features
-    and count how often each feature is selected across all windows.
-
-    High selection_rate → structurally stable causal predictor of SPY.
-    Low selection_rate  → regime-specific feature, appearing only during
-    particular market conditions (e.g. VIX during stress periods).
-    '''
+def causal_feature_usage(df):
     causal = df[(df['exp_type'] == 'causal') & df['active_features'].notna()].copy()
     if causal.empty:
-        return pd.DataFrame(columns=[
-            'model_type', 'feature', 'selection_count', 'selection_rate', 'total_windows'
-        ])
+        return pd.DataFrame()
 
     records = []
-    for model, group in causal.groupby('model_type'):
-        total_windows = len(group)
-        feature_counts = {}
-        for _, row in group.iterrows():
+    for model, grp in causal.groupby('model_type'):
+        total = len(grp)
+        counts = {}
+        for _, row in grp.iterrows():
             try:
-                feats = (
-                    json.loads(row['active_features'])
-                    if isinstance(row['active_features'], str)
-                    else row['active_features']
-                )
+                feats = json.loads(row['active_features']) if isinstance(row['active_features'], str) else row['active_features']
                 for f in feats:
-                    feature_counts[f] = feature_counts.get(f, 0) + 1
+                    counts[f] = counts.get(f, 0) + 1
             except (json.JSONDecodeError, TypeError):
                 continue
-        for feat, count in feature_counts.items():
+        for feat, count in counts.items():
             records.append({
-                'model_type':      model,
-                'feature':         feat,
+                'model_type': model, 'feature': feat,
                 'selection_count': count,
-                'selection_rate':  round(count / total_windows, 4),
-                'total_windows':   total_windows,
+                'selection_rate': round(count / total, 4),
+                'total_windows': total,
             })
 
-    return (
-        pd.DataFrame(records)
-        .sort_values(['model_type', 'selection_count'], ascending=[True, False])
-        .reset_index(drop=True)
-    )
+    return pd.DataFrame(records).sort_values(
+        ['model_type', 'selection_count'], ascending=[True, False]
+    ).reset_index(drop=True)
 
 
-# ----- 11. FRIEDMAN RANKS ----- #
+# ── 11. FRIEDMAN RANKS ──
 
-def compute_friedman_ranks(df):
-    '''
-    Rank all retrainers per window per model (1 = best F1), then average
-    ranks across windows. Lower mean rank = better overall strategy.
-
-    Also runs the Friedman chi-squared test (non-parametric equivalent of
-    repeated-measures ANOVA) to test whether differences in ranks are
-    statistically significant across the full set of strategies.
-
-    This is the standard ML benchmarking methodology (Demsar 2006) and
-    is the correct complement to the pairwise Wilcoxon tests in
-    significance_test.py — it controls family-wise error rate.
-
-    Outputs:
-        friedman_ranks.csv     — mean rank per (model_type, retrainer)
-        friedman_test.csv      — one row per model_type with chi2 stat and p-value
-    '''
+def friedman_ranks(df):
     rank_records = []
     test_records = []
 
-    for model, group in df.groupby('model_type'):
-        pivot = group.pivot_table(
-            index='date_start',
-            columns='retrainer',
-            values='f1',
-        )
-
-        # log dropped windows so missing data is visible, not silent
+    for model, grp in df.groupby('model_type'):
+        pivot = grp.pivot_table(index='date_start', columns='retrainer', values='f1')
         n_before = len(pivot)
         pivot = pivot.dropna()
-        n_after  = len(pivot)
-        if n_before != n_after:
-            print(
-                f'  [friedman/{model}] dropped {n_before - n_after} windows '
-                f'({n_before - n_after}/{n_before}) due to incomplete retrainer coverage. '
-                f'Check for crashed experiments.'
-            )
+        if n_before != len(pivot):
+            print(f'  [friedman/{model}] dropped {n_before - len(pivot)} incomplete windows')
 
         if pivot.empty or pivot.shape[1] < 2:
             continue
 
-        # rank within each window: rank 1 = highest F1
         ranked = pivot.rank(axis=1, ascending=False, method='average')
-        mean_ranks = ranked.mean().sort_values()
-
-        for retrainer, mean_rank in mean_ranks.items():
+        for retrainer, mean_rank in ranked.mean().sort_values().items():
             rank_records.append({
-                'model_type':  model,
-                'retrainer':   retrainer,
-                'exp_type':    get_experiment_type(retrainer),
-                'mean_rank':   round(mean_rank, 4),
-                'n_windows':   len(pivot),
+                'model_type': model, 'retrainer': retrainer,
+                'exp_type': get_experiment_type(retrainer),
+                'mean_rank': round(mean_rank, 4), 'n_windows': len(pivot),
             })
 
-        # friedman test — needs one array per retrainer
-        arrays = [pivot[col].values for col in pivot.columns]
-        if len(arrays) >= 3:
+        if pivot.shape[1] >= 3:
+            arrays = [pivot[col].values for col in pivot.columns]
             stat, p = friedmanchisquare(*arrays)
             test_records.append({
-                'model_type':   model,
-                'n_retrainers': len(arrays),
-                'n_windows':    len(pivot),
-                'chi2_stat':    round(stat, 4),
-                'p_value':      round(p, 6),
-                'significant':  p < 0.05,
+                'model_type': model, 'n_retrainers': len(arrays),
+                'n_windows': len(pivot),
+                'chi2_stat': round(stat, 4), 'p_value': round(p, 6),
+                'significant': p < 0.05,
             })
 
-    ranks_df = (
-        pd.DataFrame(rank_records)
-        .sort_values(['model_type', 'mean_rank'])
-        .reset_index(drop=True)
-    )
-    test_df = pd.DataFrame(test_records)
+    ranks_df = pd.DataFrame(rank_records).sort_values(['model_type', 'mean_rank']).reset_index(drop=True)
+    test_df  = pd.DataFrame(test_records)
     return ranks_df, test_df
 
 
-# ----- 12. REGIME RETRAIN RATE ----- #
+# ── 12. REGIME RETRAIN RATE ──
 
-def compute_regime_retrain_rate(df):
-    '''
-    Retrains-per-window split by stress vs. calm regime.
-
-    A well-calibrated MSM strategy should show a noticeably higher retrain
-    rate during stress windows than during calm periods. A FixedSchedule or
-    Random strategy will show similar rates in both — this is the key
-    selectivity comparison for the thesis.
-
-    retrain_rate_stress / retrain_rate_calm > 1 means the strategy is
-    concentrating retrains during the periods that matter most.
-
-    likely_inverted flags any strategy where stress_calm_ratio < 1.0,
-    meaning it retrains more during calm than stress — a signal of
-    misconfiguration (e.g. the SPY-MSM empty-graph bug).
-    '''
+def regime_retrain_rate(df):
     data = df.copy()
     data['regime'] = data['date_start'].apply(
-        lambda d: 'stress' if in_any_window(d) else 'calm'
+        lambda d: 'stress' if in_stress_window(d) else 'calm'
     )
-
     rate = (
         data.groupby(['model_type', 'retrainer', 'exp_type', 'regime'])
-        .agg(
-            retrains=('retrain_triggered', 'sum'),
-            windows =('retrain_triggered', 'count'),
-        )
+        .agg(retrains=('retrain_triggered', 'sum'), windows=('retrain_triggered', 'count'))
         .reset_index()
     )
     rate['retrain_rate'] = (rate['retrains'] / rate['windows']).round(4)
 
     pivot = rate.pivot_table(
         index=['model_type', 'retrainer', 'exp_type'],
-        columns='regime',
-        values='retrain_rate',
+        columns='regime', values='retrain_rate',
     ).reset_index()
     pivot.columns.name = None
 
-    rename = {}
     if 'stress' in pivot.columns:
-        rename['stress'] = 'retrain_rate_stress'
+        pivot = pivot.rename(columns={'stress': 'rate_stress'})
     if 'calm' in pivot.columns:
-        rename['calm'] = 'retrain_rate_calm'
-    pivot = pivot.rename(columns=rename)
+        pivot = pivot.rename(columns={'calm': 'rate_calm'})
 
-    if 'retrain_rate_stress' in pivot.columns and 'retrain_rate_calm' in pivot.columns:
+    if 'rate_stress' in pivot.columns and 'rate_calm' in pivot.columns:
         pivot['stress_calm_ratio'] = (
-            pivot['retrain_rate_stress'] / pivot['retrain_rate_calm'].replace(0, np.nan)
+            pivot['rate_stress'] / pivot['rate_calm'].replace(0, np.nan)
         ).round(4)
-
-        # flag strategies retraining more during calm than stress
         pivot['likely_inverted'] = pivot['stress_calm_ratio'] < 1.0
 
     return pivot.sort_values(
-        ['model_type', 'stress_calm_ratio'] if 'stress_calm_ratio' in pivot.columns
-        else ['model_type'],
+        ['model_type', 'stress_calm_ratio'] if 'stress_calm_ratio' in pivot.columns else ['model_type'],
         ascending=[True, False] if 'stress_calm_ratio' in pivot.columns else [True],
     ).reset_index(drop=True)
 
-ROBUSTNESS_WINDOW_DAYS = [45, 60, 90, 120]
 
-def compute_stress_window_robustness(df):
-    '''
-    Re-run the stress-period F1 split for several values of STRESS_WINDOW_DAYS
-    and report whether MSM's stress advantage holds at every width.
+# ── 13. STRESS WINDOW ROBUSTNESS ──
 
-    A claim that survives 45/60/90/120 day windows is robust.
-    A claim that only holds at 120 days is sensitive to the definition.
-
-    Output:
-        results/analysis/stress_window_robustness.csv         — full table
-        results/analysis/stress_window_robustness_summary.csv — boolean grid
-    '''
+def stress_window_robustness(df):
     records = []
-
     for window_days in ROBUSTNESS_WINDOW_DAYS:
-        def in_window(date, wd=window_days):
+        def _in(date, wd=window_days):
             return any(
-                (ed - pd.Timedelta(days=wd)) <= date <= (ed + pd.Timedelta(days=wd))
-                for ed in STRESS_EVENTS.values()
+                (ev - pd.Timedelta(days=wd)) <= date <= (ev + pd.Timedelta(days=wd))
+                for ev in STRESS_EVENTS.values()
             )
 
         data = df.copy()
-        data['regime'] = data['date_start'].apply(
-            lambda d: 'stress' if in_window(d) else 'calm'
-        )
-
-        n_stress = int((data['regime'] == 'stress').sum())
-        n_calm   = int((data['regime'] == 'calm').sum())
+        data['regime'] = data['date_start'].apply(lambda d: 'stress' if _in(d) else 'calm')
 
         pivot = (
             data.groupby(['model_type', 'retrainer', 'exp_type', 'regime'])
-                .agg(mean_f1=('f1', 'mean'))
-                .reset_index()
-                .pivot_table(
-                    index=['model_type', 'retrainer', 'exp_type'],
-                    columns='regime',
-                    values='mean_f1',
-                )
-                .reset_index()
+            .agg(mean_f1=('f1', 'mean')).reset_index()
+            .pivot_table(index=['model_type', 'retrainer', 'exp_type'],
+                         columns='regime', values='mean_f1').reset_index()
         )
         pivot.columns.name = None
-
         if 'stress' in pivot.columns and 'calm' in pivot.columns:
             pivot['f1_stress_minus_calm'] = (pivot['stress'] - pivot['calm']).round(4)
-
         pivot['stress_window_days'] = window_days
-        pivot['n_stress_windows']   = n_stress
-        pivot['n_calm_windows']     = n_calm
         records.append(pivot)
 
     full = pd.concat(records, ignore_index=True)
 
-    # Build the boolean robustness summary: does each MSM-family config beat
-    # the best static baseline at every window width?
-    msm_set      = {'msm', 'spy_msm', 'timeout_msm', 'causal'}
     summary_rows = []
-
     for (model, exp), grp in full.groupby(['model_type', 'exp_type']):
-        if exp not in msm_set:
+        if exp not in MSM_TYPES:
             continue
         for wd in ROBUSTNESS_WINDOW_DAYS:
             msm_row = grp[grp['stress_window_days'] == wd]
-            if msm_row.empty or 'f1_stress_minus_calm' not in msm_row.columns:
-                continue
-            msm_delta = msm_row['f1_stress_minus_calm'].max()
-
             static_rows = full[
-                (full['model_type'] == model)
-                & (full['exp_type'] == 'static')
+                (full['model_type'] == model) & (full['exp_type'] == 'static')
                 & (full['stress_window_days'] == wd)
             ]
-            if static_rows.empty or 'f1_stress_minus_calm' not in static_rows.columns:
+            if msm_row.empty or static_rows.empty:
                 continue
-            static_delta = static_rows['f1_stress_minus_calm'].max()
-
+            if 'f1_stress_minus_calm' not in msm_row.columns or 'f1_stress_minus_calm' not in static_rows.columns:
+                continue
             summary_rows.append({
-                'model_type':              model,
-                'exp_type':                exp,
-                'stress_window_days':      wd,
-                'msm_f1_stress_delta':     round(msm_delta, 4),
-                'static_f1_stress_delta':  round(static_delta, 4),
-                'msm_beats_static':        bool(msm_delta > static_delta),
+                'model_type': model, 'exp_type': exp,
+                'stress_window_days': wd,
+                'msm_delta':    round(msm_row['f1_stress_minus_calm'].max(), 4),
+                'static_delta': round(static_rows['f1_stress_minus_calm'].max(), 4),
+                'msm_beats_static': bool(msm_row['f1_stress_minus_calm'].max() > static_rows['f1_stress_minus_calm'].max()),
             })
 
-    summary = pd.DataFrame(summary_rows)
-    return full, summary
+    return full, pd.DataFrame(summary_rows)
 
 
-# ----- MAIN ----- #
+# ── MAIN ──
 
 def main():
-    os.makedirs('results/analysis', exist_ok=True)
+    out = 'results/analysis'
+    os.makedirs(out, exist_ok=True)
 
     df = load_results()
-    print(
-        f'Loaded {len(df):,} rows | '
-        f'{df["model_type"].nunique()} models | '
-        f'{df["retrainer"].nunique()} retrainers | '
-        f'{df["exp_type"].nunique()} experiment types'
-    )
+    print(f'Loaded {len(df):,} rows | {df["model_type"].nunique()} models | '
+          f'{df["retrainer"].nunique()} retrainers')
 
-    # 1. overall summary
-    summary = compute_overall_summary(df)
-    summary.to_csv('results/analysis/overall_summary.csv', index=False)
-    print('\n=== Overall Summary (top 10) ===')
-    print(summary.head(10).to_string(index=False))
+    def _save(data, name):
+        data.to_csv(f'{out}/{name}', index=False)
+        print(f'  saved {name} ({len(data)} rows)')
 
-    # 2. per-class F1
-    per_class = compute_per_class_f1(df)
-    per_class.to_csv('results/analysis/per_class_f1.csv', index=False)
-    print(f'\nPer-class F1 saved ({len(per_class)} rows).')
+    # 1
+    _save(overall_summary(df), 'overall_summary.csv')
 
-    # 3. detection latency
-    latency = compute_detection_latency(df)
-    latency.to_csv('results/analysis/detection_latency.csv', index=False)
-    print('\n=== Detection Latency ===')
-    print(latency.to_string(index=False))
+    # 2
+    _save(per_class_f1(df), 'per_class_f1.csv')
 
-    # 4. false positive rate
-    fpr = compute_false_positive_rate(df)
-    fpr.to_csv('results/analysis/false_positive_rate.csv', index=False)
-    print('\n=== False Positive Rate (lowest 10) ===')
-    print(fpr.sort_values('false_positive_rate').head(10).to_string(index=False))
+    # 3
+    _save(detection_latency(df), 'detection_latency.csv')
 
-    # 5. best configs per experiment type
-    best = compute_best_configs(df, top_k=3)
-    best.to_csv('results/analysis/best_configs.csv', index=False)
-    print(f'\nBest configs saved ({len(best)} rows).')
+    # 4
+    _save(false_positive_rate(df), 'false_positive_rate.csv')
 
-    # 6. retrain efficiency
-    efficiency = compute_retrain_efficiency(df, lookback=3)
-    efficiency.to_csv('results/analysis/retrain_efficiency.csv', index=False)
-    mean_delta = (
-        efficiency.groupby(['model_type', 'exp_type'])['f1_delta']
-        .mean().round(4).sort_values(ascending=False)
-    )
-    print('\n=== Mean F1 Delta per Retrain by Experiment Type ===')
-    print(mean_delta.to_string())
+    # 5
+    _save(best_configs(df), 'best_configs.csv')
 
-    # 7. cooldown analysis
-    cooldown = compute_cooldown_analysis(df)
-    cooldown.to_csv('results/analysis/cooldown_analysis.csv', index=False)
-    print('\n=== Cooldown Suppression Rate (top 10) ===')
-    print(
-        cooldown.sort_values('suppression_rate', ascending=False)
-        .head(10).to_string(index=False)
-    )
+    # 6
+    _save(retrain_efficiency(df), 'retrain_efficiency.csv')
 
-    # 8. stress vs. calm F1
-    stress_f1 = compute_stress_period_f1(df)
-    stress_f1.to_csv('results/analysis/stress_period_f1.csv', index=False)
-    print(f'\nStress-period F1 saved ({len(stress_f1)} rows).')
-    if 'f1_stress_minus_calm' in stress_f1.columns:
-        print('\n=== Top 10 Strategies by Stress F1 Advantage ===')
-        cols = ['model_type', 'retrainer', 'exp_type',
-                'mean_f1_stress', 'mean_f1_calm', 'f1_stress_minus_calm']
-        cols = [c for c in cols if c in stress_f1.columns]
-        print(stress_f1[cols].head(10).to_string(index=False))
+    # 7
+    _save(cooldown_analysis(df), 'cooldown_analysis.csv')
 
-    # 9. sensitivity summary (MSM-family, causal excluded)
-    sensitivity = compute_sensitivity_summary(df)
-    if not sensitivity.empty:
-        sensitivity.to_csv('results/analysis/sensitivity_summary.csv', index=False)
-        print(f'\nSensitivity summary saved ({len(sensitivity)} rows).')
+    # 8
+    _save(stress_period_f1(df), 'stress_period_f1.csv')
+
+    # 9
+    sens = sensitivity_summary(df)
+    if not sens.empty:
+        _save(sens, 'sensitivity_summary.csv')
     else:
-        print('\nNo MSM-family configs found — sensitivity_summary.csv skipped.')
+        print('  sensitivity_summary.csv skipped (no MSM configs)')
 
-    # 10. causal feature usage
-    feature_usage = compute_causal_feature_usage(df)
-    feature_usage.to_csv('results/analysis/causal_feature_usage.csv', index=False)
-    print(f'\nCausal feature usage saved ({len(feature_usage)} rows).')
-    if not feature_usage.empty:
-        print('\n=== Top 10 Most Selected Causal Features (xgboost) ===')
-        top = feature_usage[feature_usage['model_type'] == 'xgboost'].head(10)
-        print(top[['feature', 'selection_count', 'selection_rate']].to_string(index=False))
+    # 10
+    _save(causal_feature_usage(df), 'causal_feature_usage.csv')
 
-    # 11. friedman ranks + test
-    ranks_df, test_df = compute_friedman_ranks(df)
-    ranks_df.to_csv('results/analysis/friedman_ranks.csv', index=False)
+    # 11
+    ranks_df, test_df = friedman_ranks(df)
+    _save(ranks_df, 'friedman_ranks.csv')
     if not test_df.empty:
-        test_df.to_csv('results/analysis/friedman_test.csv', index=False)
-        print('\n=== Friedman Test Results ===')
-        print(test_df.to_string(index=False))
-    print('\n=== Mean Rank per Strategy (lower = better, xgboost) ===')
-    xgb_ranks = ranks_df[ranks_df['model_type'] == 'xgboost']
-    print(xgb_ranks[['retrainer', 'exp_type', 'mean_rank']].head(15).to_string(index=False))
+        _save(test_df, 'friedman_test.csv')
 
-    # 12. regime retrain rate
-    regime_rate = compute_regime_retrain_rate(df)
-    regime_rate.to_csv('results/analysis/regime_retrain_rate.csv', index=False)
-    print(f'\nRegime retrain rate saved ({len(regime_rate)} rows).')
-    if 'stress_calm_ratio' in regime_rate.columns:
-        print('\n=== Top 10 Strategies by Stress/Calm Retrain Ratio ===')
-        print(
-            regime_rate[['model_type', 'retrainer', 'exp_type', 'retrain_rate_stress', 'retrain_rate_calm', 'stress_calm_ratio']]
-            .head(10).to_string(index=False)
-        )
-        
-    # 13. stress window robustness
-    robustness_full, robustness_summary = compute_stress_window_robustness(df)
-    robustness_full.to_csv(
-        'results/analysis/stress_window_robustness.csv', index=False
-    )
-    if not robustness_summary.empty:
-        robustness_summary.to_csv(
-            'results/analysis/stress_window_robustness_summary.csv', index=False
-        )
-        print('\n=== Stress Window Robustness (MSM beats static at each width?) ===')
-        pivot = robustness_summary.pivot_table(
-            index=['model_type', 'exp_type'],
-            columns='stress_window_days',
-            values='msm_beats_static',
-        )
-        print(pivot.to_string())
+    # 12
+    _save(regime_retrain_rate(df), 'regime_retrain_rate.csv')
 
-    print('\nAll outputs written to results/analysis/')
+    # 13
+    rob_full, rob_summary = stress_window_robustness(df)
+    _save(rob_full, 'stress_window_robustness.csv')
+    if not rob_summary.empty:
+        _save(rob_summary, 'stress_window_robustness_summary.csv')
+
+    print(f'\nAll outputs in {out}/')
 
 
 if __name__ == '__main__':
