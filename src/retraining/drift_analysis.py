@@ -1,8 +1,7 @@
 '''
-drift_analysis.py — Visualise causal-structure drift vs forecast performance.
+drift_analysis.py — Visualise drift signals vs forecast performance.
 
-Produces the plots most directly tied to the thesis claim that causal
-structure breakdown precedes F1 loss.
+Complements lead_lag_analysis.py with retrainer-output-based visualisations.
 
 Run after analysis.py.
 
@@ -10,31 +9,32 @@ Outputs:
     results/plots/fig_06_msm_drift_signal_{model}.png
     results/plots/fig_07_msm_vs_adwin_firing_{model}.png
     results/plots/fig_08_causal_structure_collapse.png
+    results/plots/fig_12_lead_lag_retrainer_{model}.png
     results/analysis/drift_summary.csv
-    results/analysis/msm_f1_lead_lag.csv
+    results/analysis/msm_f1_lead_lag_retrainer.csv
 '''
 
 import os
 import sys
+
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as cfg
 from analysis import load_results
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-get_experiment_type = cfg.get_experiment_type
-STRESS_EVENTS = cfg.STRESS_EVENTS
-STRESS_WINDOW_DAYS = cfg.STRESS_WINDOW_DAYS
-MSM_TYPES = cfg.MSM_TYPES
+STRESS_EVENTS        = cfg.STRESS_EVENTS
+STRESS_WINDOW_DAYS   = cfg.STRESS_WINDOW_DAYS
+MSM_TYPES            = cfg.MSM_TYPES
+get_experiment_type  = cfg.get_experiment_type
 
 PLOT_DIR     = 'results/plots'
 ANALYSIS_DIR = 'results/analysis'
 
-# ── Thesis plot defaults ──
 plt.rcParams.update({
     'font.family': 'serif',
     'font.size': 10,
@@ -66,8 +66,6 @@ def _best_msm_name(model_df):
     return msm.groupby('retrainer')['f1'].mean().idxmax()
 
 
-# ── Plot 06: MSM drift signal vs F1 ──
-
 def plot_msm_drift_signal(df):
     for model, model_df in df.groupby('model_type'):
         best_name = _best_msm_name(model_df)
@@ -81,9 +79,8 @@ def plot_msm_drift_signal(df):
             continue
 
         fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(10, 6), sharex=True,
-                                              gridspec_kw={'height_ratios': [1.2, 1]})
+                                             gridspec_kw={'height_ratios': [1.2, 1]})
 
-        # Top: MSM with thresholds and retrain markers
         ax_top.plot(best['date_end'], best['graph_msm'],
                     color='#1976D2', linewidth=1.2, label='Graph MSM')
 
@@ -108,11 +105,14 @@ def plot_msm_drift_signal(df):
         ax_top.legend(loc='lower left', fontsize=8, ncol=2)
         ax_top.grid(alpha=0.2)
 
-        # Bottom: rolling F1
-        msm_f1    = best.set_index('date_end')['f1'].rolling(5, min_periods=1).mean()
-        static_f1 = static.set_index('date_end')['f1'].rolling(5, min_periods=1).mean()
-        ax_bot.plot(msm_f1.index,    msm_f1.values,    color='#1976D2', lw=1.2, label=f'MSM ({best_name[:30]})')
-        ax_bot.plot(static_f1.index, static_f1.values, color='#757575', lw=1.2, label='Static')
+        msm_f1 = best.set_index('date_end')['f1'].rolling(5, min_periods=1).mean()
+        static_f1 = (static.set_index('date_end')['f1'].rolling(5, min_periods=1).mean()
+                     if not static.empty else pd.Series(dtype=float))
+        ax_bot.plot(msm_f1.index, msm_f1.values, color='#1976D2', lw=1.2,
+                    label='MSM (best)')
+        if not static_f1.empty:
+            ax_bot.plot(static_f1.index, static_f1.values, color='#757575', lw=1.2,
+                        label='Static')
         _shade_stress(ax_bot)
         ax_bot.set_xlabel('Window end date')
         ax_bot.set_ylabel('F1 (5-window rolling mean)')
@@ -125,8 +125,6 @@ def plot_msm_drift_signal(df):
         plt.close(fig)
         print(f'  Saved: {path}')
 
-
-# ── Plot 07: MSM vs ADWIN firing timeline ──
 
 def plot_msm_vs_adwin_firing(df):
     for model, model_df in df.groupby('model_type'):
@@ -154,8 +152,6 @@ def plot_msm_vs_adwin_firing(df):
         plt.close(fig)
         print(f'  Saved: {path}')
 
-
-# ── Plot 08: Causal structure collapse ──
 
 def plot_causal_structure_collapse(df):
     summary_path = 'results/causal_discovery/causal_discovery_summary.csv'
@@ -203,9 +199,7 @@ def plot_causal_structure_collapse(df):
     print(f'  Saved: {path}')
 
 
-# ── Lead-lag cross-correlation ──
-
-def compute_lead_lag(df, max_lag=10):
+def compute_lead_lag_retrainer(df, max_lag=10):
     records = []
     for model, model_df in df.groupby('model_type'):
         msm_sub = model_df[model_df['exp_type'].isin(MSM_TYPES - {'causal'})]
@@ -223,19 +217,20 @@ def compute_lead_lag(df, max_lag=10):
             continue
 
         for lag in range(-max_lag, max_lag + 1):
-            if lag >= 0:
-                corr = np.corrcoef(msm[:len(msm)-lag] if lag > 0 else msm,
-                                    f1[lag:] if lag > 0 else f1)[0, 1]
+            if lag > 0:
+                x, y = msm[:-lag], f1[lag:]
+            elif lag < 0:
+                x, y = msm[-lag:], f1[:lag]
             else:
-                corr = np.corrcoef(msm[-lag:], f1[:len(f1)+lag])[0, 1]
+                x, y = msm, f1
+            corr = np.corrcoef(x, y)[0, 1]
             records.append({'model_type': model, 'retrainer': best_name,
                             'lag': lag, 'correlation': round(corr, 4)})
 
     result = pd.DataFrame(records)
     if not result.empty:
-        result.to_csv(os.path.join(ANALYSIS_DIR, 'msm_f1_lead_lag.csv'), index=False)
+        result.to_csv(os.path.join(ANALYSIS_DIR, 'msm_f1_lead_lag_retrainer.csv'), index=False)
 
-        # Plot it
         for model, grp in result.groupby('model_type'):
             fig, ax = plt.subplots(figsize=(7, 4))
             ax.bar(grp['lag'], grp['correlation'], color='#1976D2', alpha=0.8)
@@ -244,19 +239,17 @@ def compute_lead_lag(df, max_lag=10):
             ax.axvline(0, color='black', lw=0.5)
             ax.set_xlabel('Lag (positive = MSM leads F1)')
             ax.set_ylabel('Cross-correlation')
-            ax.set_title(f'MSM–F1 Lead-Lag Correlation — {model}')
+            ax.set_title(f'MSM–F1 Lead-Lag (retrainer run) — {model}')
             ax.legend(fontsize=8)
             ax.grid(alpha=0.2)
             plt.tight_layout()
-            path = os.path.join(PLOT_DIR, f'fig_12_lead_lag_{model}.png')
+            path = os.path.join(PLOT_DIR, f'fig_12_lead_lag_retrainer_{model}.png')
             fig.savefig(path)
             plt.close(fig)
             print(f'  Saved: {path}')
 
     return result
 
-
-# ── Drift summary CSV ──
 
 def drift_summary(df):
     rows = []
@@ -291,7 +284,6 @@ def main():
     df = load_results()
     df['exp_type'] = df['retrainer'].apply(get_experiment_type)
 
-    # Ensure date_end is parsed for time-series x-axis
     if 'date_end' in df.columns:
         df['date_end'] = pd.to_datetime(df['date_end'])
 
@@ -304,8 +296,8 @@ def main():
     print('fig_08: Causal structure collapse...')
     plot_causal_structure_collapse(df)
 
-    print('fig_12: MSM-F1 lead-lag...')
-    compute_lead_lag(df)
+    print('fig_12: retrainer lead-lag (robustness check)...')
+    compute_lead_lag_retrainer(df)
 
     print('Drift summary CSV...')
     drift_summary(df)

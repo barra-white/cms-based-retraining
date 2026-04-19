@@ -1,32 +1,42 @@
 '''
 interpret_results.py — Structured narrative report from analysis CSVs.
 
-Run AFTER analysis.py and significance_test.py.
+Run AFTER analysis.py, significance_test.py, and lead_lag_analysis.py.
 
-Reads results/analysis/*.csv and prints a structured report.
-Also saves to results/analysis/narrative_report.txt.
+Reads results/analysis/*.csv and produces results/analysis/narrative_report.txt.
 
 Sections:
     1. Overall strategy ranking
-    2. Stress vs calm regime performance
-    3. Detection latency
-    4. Retrain selectivity
-    5. Statistical significance
-    6. Hyperparameter sensitivity
-    7. Causal feature usage
-    8. Bin recalibration control
+    2. Aggregate metrics (macro F1, weighted F1, MCC, Cohen's kappa)
+    3. Stress vs calm regime performance
+    4. Detection latency
+    5. Retrain selectivity
+    6. Statistical significance
+    7. Hyperparameter sensitivity
+    8. Causal feature usage
+    9. Lead-lag analysis (RQ1 evidence)
+    10. Bootstrap F1 confidence intervals
+
+Changes from original:
+    - Imports from config.py (BASELINE_TYPES now includes perf and adwin)
+    - Added section_lead_lag (primary RQ1 evidence; was missing)
+    - Added section_aggregate_metrics (MCC, kappa, weighted F1)
+    - Added section_bootstrap_ci
+    - Removed section_bin_control (fixed-stdev binning makes it obsolete)
 '''
 
 import os
+import sys
 import textwrap
+
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as cfg
 
-STRESS_EVENTS = cfg.STRESS_EVENTS
-STRESS_WINDOW_DAYS = cfg.STRESS_WINDOW_DAYS
-MSM_TYPES = cfg.MSM_TYPES
-BASELINE_TYPES = cfg.BASELINE_TYPES
+MSM_TYPES           = cfg.MSM_TYPES
+BASELINE_TYPES      = cfg.BASELINE_TYPES
 get_experiment_type = cfg.get_experiment_type
 
 ANALYSIS_DIR = 'results/analysis'
@@ -51,16 +61,13 @@ def _load(name):
     df = pd.read_csv(path)
     if df.empty:
         return df
-    # Backfill exp_type if missing (stale CSV from older analysis.py)
     if 'exp_type' not in df.columns and 'retrainer' in df.columns:
-        df['exp_type'] = df['retrainer'].apply(
-            lambda n: next((p for p in ['spy_msm','timeout_msm','msm','causal',
-                            'fixed','perf','adwin','random','static'] if n.startswith(p)), 'other'))
+        df['exp_type'] = df['retrainer'].apply(get_experiment_type)
     return df
 
 def _tag(exp):
     if exp in MSM_TYPES:      return ' [MSM]'
-    if exp in BASELINE_TYPES:  return ' [baseline]'
+    if exp in BASELINE_TYPES: return ' [baseline]'
     return ''
 
 
@@ -91,18 +98,50 @@ def section_ranking(L):
                 f"Diff: {delta:+.4f}"))
             if delta <= 0:
                 L.append(_f('CONCERN', 'MSM does not outperform best baseline on raw F1. '
-                            'Check stress-period analysis.'))
+                            'Rely on stress-period, detection-latency, and lead-lag evidence.'))
 
-        # Mean F1 by exp_type
         L.append('  F1 by type:')
         for exp, f1 in grp.groupby('exp_type')['mean_f1'].mean().sort_values(ascending=False).items():
             L.append(f'    {exp:<20} {f1:.4f}{_tag(exp)}')
 
 
-# ── 2. Stress vs calm ──
+# ── 2. Aggregate metrics ──
+
+def section_aggregate_metrics(L):
+    L.append(_h('2. AGGREGATE METRICS (robust to class imbalance)'))
+    df = _load('aggregate_metrics.csv')
+    if df is None:
+        L.append('  [MISSING] aggregate_metrics.csv')
+        return
+
+    L.append('')
+    L.append('  MCC and Cohen\'s kappa correct for chance agreement and are not')
+    L.append('  biased by class imbalance. Use these when macro F1 differences')
+    L.append('  are small.')
+
+    for model, grp in df.groupby('model_type'):
+        L.append(_sub(f'Model: {model}'))
+        grp = grp.sort_values('mcc', ascending=False)
+        top = grp.iloc[0]
+        L.append(_f('FINDING',
+            f"Best by MCC: '{top['retrainer']}' (MCC={top['mcc']:.4f}, "
+            f"kappa={top['cohens_kappa']:.4f}, weighted_f1={top['weighted_f1']:.4f})"))
+
+        msm  = grp[grp['exp_type'].isin(MSM_TYPES)]
+        base = grp[grp['exp_type'].isin(BASELINE_TYPES)]
+        if not msm.empty and not base.empty:
+            bm = msm.iloc[0]
+            bb = base.iloc[0]
+            L.append(_f('DETAIL',
+                f"Best MSM MCC={bm['mcc']:.4f} kappa={bm['cohens_kappa']:.4f} | "
+                f"Best baseline MCC={bb['mcc']:.4f} kappa={bb['cohens_kappa']:.4f} | "
+                f"MCC diff: {bm['mcc'] - bb['mcc']:+.4f}"))
+
+
+# ── 3. Stress vs calm ──
 
 def section_stress(L):
-    L.append(_h('2. STRESS vs CALM'))
+    L.append(_h('3. STRESS vs CALM'))
     df = _load('stress_period_f1.csv')
     if df is None or 'f1_stress_minus_calm' not in df.columns:
         L.append('  [MISSING]')
@@ -122,13 +161,13 @@ def section_stress(L):
             if bm['f1_stress_minus_calm'] > bb['f1_stress_minus_calm']:
                 L.append(_f('FINDING', 'MSM degrades less during stress than best baseline.'))
             else:
-                L.append(_f('CONCERN', 'MSM shows no clear stress advantage.'))
+                L.append(_f('CONCERN', 'MSM shows no clear stress advantage on F1.'))
 
 
-# ── 3. Detection latency ──
+# ── 4. Detection latency ──
 
 def section_latency(L):
-    L.append(_h('3. DETECTION LATENCY (signal-driven only)'))
+    L.append(_h('4. DETECTION LATENCY (signal-driven only)'))
     df = _load('detection_latency.csv')
     if df is None:
         L.append('  [MISSING]')
@@ -148,22 +187,22 @@ def section_latency(L):
                     f"Fastest: '{fastest['retrainer']}' at {fastest['latency_windows']} windows"))
 
 
-# ── 4. Selectivity ──
+# ── 5. Selectivity ──
 
 def section_selectivity(L):
-    L.append(_h('4. RETRAIN SELECTIVITY'))
+    L.append(_h('5. RETRAIN SELECTIVITY'))
     df = _load('false_positive_rate.csv')
     if df is None or df.empty:
         L.append('  [MISSING or EMPTY] — no retrains detected across any strategy.')
         return
 
     if 'precision' not in df.columns:
-        L.append('  [SKIP] precision column missing — delete results/analysis/ and re-run analysis.py')
+        L.append('  [SKIP] precision column missing')
         return
 
     for model, grp in df.groupby('model_type'):
         L.append(_sub(f'Model: {model}'))
-        msm = grp[grp['exp_type'].isin(MSM_TYPES)]
+        msm  = grp[grp['exp_type'].isin(MSM_TYPES)]
         base = grp[grp['exp_type'].isin(BASELINE_TYPES)]
         if not msm.empty and not base.empty:
             L.append(_f('DETAIL',
@@ -171,10 +210,10 @@ def section_selectivity(L):
                 f"Mean baseline precision: {base['precision'].mean():.4f}"))
 
 
-# ── 5. Significance ──
+# ── 6. Significance ──
 
 def section_significance(L):
-    L.append(_h('5. STATISTICAL SIGNIFICANCE'))
+    L.append(_h('6. STATISTICAL SIGNIFICANCE'))
 
     friedman = _load('friedman_test.csv')
     if friedman is not None:
@@ -183,7 +222,7 @@ def section_significance(L):
             sig = 'SIGNIFICANT' if row['significant'] else 'NOT significant'
             L.append(f"  {row['model_type']}: chi2={row['chi2_stat']:.4f} p={row['p_value']:.6f} → {sig}")
             if not row['significant']:
-                L.append(_f('CONCERN', 'Friedman not significant. Report effect sizes instead.'))
+                L.append(_f('CONCERN', 'Friedman not significant. Rely on effect sizes.'))
 
     wilcoxon = _load('wilcoxon_results.csv')
     if wilcoxon is not None:
@@ -203,10 +242,10 @@ def section_significance(L):
                          f"d={row['cohens_d']:+.3f} ({row['effect_label']})")
 
 
-# ── 6. Sensitivity ──
+# ── 7. Sensitivity ──
 
 def section_sensitivity(L):
-    L.append(_h('6. HYPERPARAMETER SENSITIVITY'))
+    L.append(_h('7. HYPERPARAMETER SENSITIVITY'))
     df = _load('sensitivity_summary.csv')
     if df is None:
         L.append('  [MISSING]')
@@ -220,13 +259,13 @@ def section_sensitivity(L):
             if rng <= 0.02:
                 L.append(_f('FINDING', 'Robust plateau — results not sensitive to hyperparameters.'))
             else:
-                L.append(_f('CONCERN', f'Range > 0.02 — hyperparameters matter.'))
+                L.append(_f('CONCERN', 'Range > 0.02 — hyperparameters matter.'))
 
 
-# ── 7. Causal features ──
+# ── 8. Causal features ──
 
 def section_features(L):
-    L.append(_h('7. CAUSAL FEATURE USAGE'))
+    L.append(_h('8. CAUSAL FEATURE USAGE'))
     df = _load('causal_feature_usage.csv')
     if df is None or df.empty:
         L.append('  [MISSING or EMPTY]')
@@ -242,42 +281,104 @@ def section_features(L):
             L.append(f"    {row['feature']:<25} rate={row['selection_rate']:.3f}")
 
 
-# ── 8. Bin recalibration ──
+# ── 9. Lead-lag (RQ1 primary evidence) ──
 
-def section_bin_control(L):
-    L.append(_h('8. BIN RECALIBRATION CONTROL'))
-    df = _load('overall_summary.csv')
+def section_lead_lag(L):
+    L.append(_h('9. LEAD-LAG ANALYSIS — RQ1 PRIMARY EVIDENCE'))
+    df = _load('lead_lag_results.csv')
     if df is None:
+        L.append('  [MISSING] lead_lag_results.csv')
+        return
+
+    L.append('')
+    L.append('  Does MSM predictively lead regime-normalised returns?')
+    L.append('  (Granger causality on drift observer run, which uses a frozen')
+    L.append('   model so F1 degradation is unconfounded by retraining events.)')
+
+    # Primary test: graph MSM vs secondary target
+    primary = df[(df['signal'] == 'graph_msm') & (df['vs'] == cfg.TARGET_SECONDARY)]
+
+    L.append(_sub(f'Primary test: graph_msm → {cfg.TARGET_SECONDARY}'))
+    for _, row in primary.iterrows():
+        sig = 'SIGNIFICANT' if row.get('granger_significant', False) else 'not significant'
+        xc_str = (f"xc={row['xc_corr_at_best_lag']:.3f}@lag{row['xc_best_lag']}"
+                  if not pd.isna(row.get('xc_corr_at_best_lag', np.nan))
+                  else 'xc=N/A')
+        if 'xc_ci_lower' in row and not pd.isna(row['xc_ci_lower']):
+            xc_str += f" [CI: {row['xc_ci_lower']:.3f}, {row['xc_ci_upper']:.3f}]"
+        L.append(f"  {row['model_type']:<10}  Granger p={row['granger_min_p']:.4f} ({sig})  "
+                 f"best lag={row['granger_best_lag']}  {xc_str}")
+
+    sig_count = primary['granger_significant'].sum() if 'granger_significant' in primary.columns else 0
+    total = len(primary)
+    if total > 0:
+        if sig_count == total:
+            L.append(_f('FINDING',
+                f'MSM Granger-causes {cfg.TARGET_SECONDARY} on all {total} models. '
+                f'Strong support for RQ1: MSM provides predictive lead time over '
+                f'regime-normalised returns.'))
+        elif sig_count >= max(1, total / 2):
+            L.append(_f('FINDING',
+                f'MSM Granger-causes {cfg.TARGET_SECONDARY} on {sig_count}/{total} models. '
+                f'RQ1 supported with model-dependent caveats.'))
+        else:
+            L.append(_f('CONCERN',
+                f'MSM Granger-causes {cfg.TARGET_SECONDARY} on only {sig_count}/{total} models. '
+                f'RQ1 weakly supported.'))
+
+    # Secondary: does MSM lead F1?
+    f1_test = df[(df['signal'] == 'graph_msm') & (df['vs'] == 'F1')]
+    if not f1_test.empty:
+        L.append(_sub('Secondary: does MSM lead F1 on frozen model?'))
+        for _, row in f1_test.iterrows():
+            sig = 'SIG' if row.get('granger_significant', False) else 'ns '
+            L.append(f"  {row['model_type']:<10}  Granger p={row['granger_min_p']:.4f} [{sig}]  "
+                     f"xc best lag={row['xc_best_lag']}")
+
+    # Additional: SPY-focused MSM
+    spy_test = df[(df['signal'] == 'spy_msm') & (df['vs'] == cfg.TARGET_SECONDARY)]
+    if not spy_test.empty:
+        L.append(_sub(f'SPY-focused MSM → {cfg.TARGET_SECONDARY}'))
+        for _, row in spy_test.iterrows():
+            sig = 'SIG' if row.get('granger_significant', False) else 'ns '
+            L.append(f"  {row['model_type']:<10}  Granger p={row['granger_min_p']:.4f} [{sig}]")
+
+
+# ── 10. Bootstrap CIs ──
+
+def section_bootstrap_ci(L):
+    L.append(_h('10. BOOTSTRAP F1 CONFIDENCE INTERVALS'))
+    df = _load('f1_bootstrap_ci.csv')
+    if df is None or df.empty:
         L.append('  [MISSING]')
         return
 
+    L.append('')
+    L.append('  95% CI on mean F1 via 1000-sample bootstrap resampling.')
+    L.append('  If CIs for MSM and best baseline overlap, the F1 difference is')
+    L.append('  within sampling noise and should not be emphasised.')
+
     for model, grp in df.groupby('model_type'):
         L.append(_sub(f'Model: {model}'))
-        static = grp[grp['retrainer'] == 'static']
-        rolling = grp[grp['retrainer'] == 'static_rolling_bins']
-        msm = grp[grp['exp_type'].isin(MSM_TYPES)]
+        grp = grp.sort_values('mean_f1', ascending=False)
 
-        if static.empty or msm.empty:
-            continue
-
-        s_f1 = static.iloc[0]['mean_f1']
-        r_f1 = rolling.iloc[0]['mean_f1'] if not rolling.empty else np.nan
-        m_f1 = msm.iloc[0]['mean_f1']
-
-        L.append(f'  Static:             F1 = {s_f1:.4f}')
-        if not np.isnan(r_f1):
-            L.append(f'  StaticRollingBins:  F1 = {r_f1:.4f}  (bin recalibration gain: {r_f1 - s_f1:+.4f})')
-        L.append(f'  Best MSM:           F1 = {m_f1:.4f}  (total gain: {m_f1 - s_f1:+.4f})')
-
-        if not np.isnan(r_f1) and abs(m_f1 - r_f1) < 0.005:
-            L.append(_f('CONCERN',
-                'MSM and StaticRollingBins are nearly identical. '
-                'Most of the apparent MSM gain may be from bin recalibration, not model retraining.'))
-        elif not np.isnan(r_f1):
-            model_gain = m_f1 - r_f1
-            L.append(_f('FINDING',
-                f'Model retraining contributes {model_gain:+.4f} beyond bin recalibration. '
-                f'This supports the thesis claim.'))
+        msm  = grp[grp['exp_type'].isin(MSM_TYPES)]
+        base = grp[grp['exp_type'].isin(BASELINE_TYPES)]
+        if not msm.empty and not base.empty:
+            bm = msm.iloc[0]
+            bb = base.iloc[0]
+            L.append(f"  Best MSM:      {bm['retrainer'][:30]:<30}  "
+                     f"{bm['mean_f1']:.4f} [{bm['ci_lower']:.4f}, {bm['ci_upper']:.4f}]")
+            L.append(f"  Best baseline: {bb['retrainer'][:30]:<30}  "
+                     f"{bb['mean_f1']:.4f} [{bb['ci_lower']:.4f}, {bb['ci_upper']:.4f}]")
+            overlap = (bm['ci_lower'] <= bb['ci_upper']) and (bb['ci_lower'] <= bm['ci_upper'])
+            if overlap:
+                L.append(_f('CONCERN',
+                    'CIs overlap — F1 difference is within sampling noise. '
+                    'Rely on stress-period and lead-lag evidence.'))
+            else:
+                L.append(_f('FINDING',
+                    'CIs do not overlap — F1 difference is genuine.'))
 
 
 def main():
@@ -289,13 +390,15 @@ def main():
     ]
 
     section_ranking(lines)
+    section_aggregate_metrics(lines)
     section_stress(lines)
     section_latency(lines)
     section_selectivity(lines)
     section_significance(lines)
     section_sensitivity(lines)
     section_features(lines)
-    section_bin_control(lines)
+    section_lead_lag(lines)
+    section_bootstrap_ci(lines)
 
     report = '\n'.join(lines)
     print(report)

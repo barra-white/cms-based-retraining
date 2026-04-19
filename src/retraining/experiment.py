@@ -2,6 +2,7 @@ import os
 import pickle
 import sys
 import traceback
+import random
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,9 @@ from retrainers import (
     DriftSignalObserverRetrainer,
 
 )
+
+np.random.seed(42)
+random.seed(42)
 
 # ----- RUN CONFIG -----
 RUN_SENSITIVITY = True

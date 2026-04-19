@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import random
 import numpy as np
 import pandas as pd
 
@@ -15,6 +16,8 @@ from abc import ABC, abstractmethod
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as cfg
 
+np.random.seed(42)
+random.seed(42)
 
 # ---- Model configurations (unchanged from original) ----
 MODEL_CONFIGS = {
@@ -203,7 +206,7 @@ class BaseRetrainer(ABC):
     def directional_accuracy(self, y_true, y_pred):
         mask = (y_true != 1)
         if np.sum(mask) == 0:
-            return 1.0
+            return np.nan
         return accuracy_score(y_true[mask], y_pred[mask])
 
     def evaluate(self, model, X_test, y_test):
@@ -380,6 +383,8 @@ class ADWINRetrainer(BaseRetrainer):
     def should_retrain(self, w, **kwargs):
         if not self.results:
             return False
+        if self._pending_retrain:
+            return True
         last = self.results[-1]
         y_true = json.loads(last['y_true'])
         y_pred = json.loads(last['y_pred'])
