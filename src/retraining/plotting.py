@@ -30,10 +30,14 @@ import matplotlib.patches as mpatches
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 warnings.filterwarnings('ignore', category=FutureWarning)
 
-from analysis import (
-    STRESS_EVENTS, STRESS_WINDOW_DAYS, MSM_TYPES, BASELINE_TYPES,
-    get_experiment_type, load_results,
-)
+import config as cfg
+from analysis import load_results
+
+STRESS_EVENTS = cfg.STRESS_EVENTS
+STRESS_WINDOW_DAYS = cfg.STRESS_WINDOW_DAYS
+MSM_TYPES = cfg.MSM_TYPES
+BASELINE_TYPES = cfg.BASELINE_TYPES
+get_experiment_type = cfg.get_experiment_type
 
 ANALYSIS_DIR = 'results/analysis'
 PLOT_DIR     = 'results/plots'

@@ -1,61 +1,54 @@
 import pandas as pd
 import numpy as np
 
-df = pd.read_csv("data/processed/combined_data.csv",parse_dates=["Date"])
+df = pd.read_csv("data/processed/combined_data.csv", parse_dates=["Date"])
 
 print(f'Raw Data Shape: {df.shape}')
 print(f'Date Range: {df.index.min()} to {df.index.max()}')
 print(f'Total Days: {len(df)}')
 
 cols_to_keep = [
-  "Date",
-  "SPY", "GLD", "UUP", "VIX", "OVX", "MOVE", "USO",
-  "T10Y2Y", "BAA10Y", "USEPUINDXD", "DGS10"
+    "Date",
+    "SPY", "GLD", "UUP", "VIX", "OVX", "MOVE", "USO",
+    "T10Y2Y", "BAA10Y", "USEPUINDXD", "DGS10",
 ]
 
 df = df[cols_to_keep].copy()
 
-
-# transformations
 out = pd.DataFrame()
 out['Date'] = df["Date"]
 
-
-# log returns for price-based features
-# returns: to allow for stationarity
-# log: to allow for multiplicative effects and to stabilize variance
-# log returns = log(price_t / price_{t-1})
+# Log returns for price-based features
 for col in ["SPY", "GLD", "UUP", "USO"]:
-  out[f'{col}_lr'] = np.log(df[col] / df[col].shift(1))
-  
+    out[f'{col}_lr'] = np.log(df[col] / df[col].shift(1))
 
-# log for VIX
-# log: large range of data values, keeps regime info
-# no first diff: destroys regime information
-
+# Log for VIX (retains regime information)
 out['VIX_ld'] = np.log(df['VIX'])
 
-
-# nothing for OVX
-# stats show OVX is stationary, this may harm performance if we take log or diff
+# OVX stationary without transformation
 out['OVX'] = df['OVX']
 
-# first diff for MOVE
-# same for T10Y2Y, BAA10Y, DGS10
-# diff: to allow for stationarity, as MOVE is non-stationary
-# maybe destroys regime info but results in more consistent causal graphs
+# First-diff for interest-rate series
 for col in ["MOVE", "T10Y2Y", "BAA10Y", "DGS10"]:
-  out[f'{col}_d'] = df[col].diff()
-  
-# log diff for USEPUINDXD
-# log diff: to allow for stationarity, as USEPUINDXD is non-stationary
-# log: to allow for multiplicative effects and to stabilize variance
+    out[f'{col}_d'] = df[col].diff()
+
+# Log-diff for policy uncertainty index
 out['USEPUINDXD_ld'] = np.log(df["USEPUINDXD"] / df["USEPUINDXD"].shift(1))
+
+# ----- Secondary target for RQ1 lead-lag analysis -----
+# Locally-standardised log return: (r_t - rolling_mean_21) / rolling_std_21.
+# The .shift(1) on rolling statistics makes normalisation CAUSAL —
+# today's value is normalised using only yesterday and earlier.
+# Stationary (passes ADF and KPSS), compatible with PCMCI+ assumptions.
+raw_spy_lr   = np.log(df['SPY'] / df['SPY'].shift(1))
+rolling_std  = raw_spy_lr.rolling(21, min_periods=21).std().shift(1)
+rolling_mean = raw_spy_lr.rolling(21, min_periods=21).mean().shift(1)
+out['SPY_lr_local_std'] = (raw_spy_lr - rolling_mean) / rolling_std
 
 out.to_csv("data/processed/transformed_data.csv", index=False)
 print("Saved transformed data to data/processed/transformed_data.csv")
 
-# standardisation: z-score normalization
+# Standardisation: z-score across full dataset
 feature_cols = [col for col in out.columns if col != "Date"]
 out[feature_cols] = (out[feature_cols] - out[feature_cols].mean()) / out[feature_cols].std()
 

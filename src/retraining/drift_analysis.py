@@ -21,11 +21,16 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import config as cfg
+from analysis import load_results
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from analysis import load_results, get_experiment_type, STRESS_EVENTS, STRESS_WINDOW_DAYS
 
-MSM_TYPES    = {'msm', 'spy_msm', 'timeout_msm', 'causal'}
+get_experiment_type = cfg.get_experiment_type
+STRESS_EVENTS = cfg.STRESS_EVENTS
+STRESS_WINDOW_DAYS = cfg.STRESS_WINDOW_DAYS
+MSM_TYPES = cfg.MSM_TYPES
+
 PLOT_DIR     = 'results/plots'
 ANALYSIS_DIR = 'results/analysis'
 

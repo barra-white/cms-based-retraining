@@ -16,8 +16,11 @@ from scipy.stats import wilcoxon
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from analysis import load_results, get_experiment_type, MSM_TYPES, BASELINE_TYPES
-
+import config as cfg
+from analysis import load_results
+MSM_TYPES      = cfg.MSM_TYPES
+BASELINE_TYPES = cfg.BASELINE_TYPES
+get_experiment_type = cfg.get_experiment_type
 
 def cohens_d(a, b):
     diff = a - b

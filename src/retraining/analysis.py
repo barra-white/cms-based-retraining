@@ -18,51 +18,20 @@ import numpy as np
 import pandas as pd
 from scipy.stats import friedmanchisquare
 from sklearn.metrics import f1_score
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import config as cfg
 
+STRESS_EVENTS          = cfg.STRESS_EVENTS
+STRESS_WINDOW_DAYS     = cfg.STRESS_WINDOW_DAYS
+EXP_TYPE_PREFIXES      = cfg.EXP_TYPE_PREFIXES
+MSM_TYPES              = cfg.MSM_TYPES
+BASELINE_TYPES         = cfg.BASELINE_TYPES
+SIGNAL_DRIVEN          = cfg.SIGNAL_DRIVEN
+get_experiment_type    = cfg.get_experiment_type
+in_stress_window       = cfg.in_stress_window
 
-# ── STRESS EVENTS ──
-# Single source of truth. All downstream code reads from here.
-# Add new events here — everything picks them up automatically.
-
-STRESS_EVENTS = {
-    'covid_crash':        pd.Timestamp('2020-02-20'),
-    'fed_hikes_2022':     pd.Timestamp('2022-03-16'),
-    'carry_trade_unwind': pd.Timestamp('2024-08-05'),
-}
-STRESS_WINDOW_DAYS = 60   # ±60 calendar days around each event
-
-ROBUSTNESS_WINDOW_DAYS = [45, 60, 90, 120]
-
-# ── EXPERIMENT TYPE RESOLUTION ──
-# Longer prefixes first to avoid 'msm' matching 'spy_msm'.
-EXP_TYPE_PREFIXES = [
-    'spy_msm', 'timeout_msm', 'msm', 'causal',
-    'fixed', 'perf', 'adwin', 'random', 'static',
-]
-
-MSM_TYPES      = {'msm', 'spy_msm', 'timeout_msm', 'causal'}
-BASELINE_TYPES = {'static', 'random', 'fixed'}
-
-# Signal-driven strategies (used to filter detection latency).
-SIGNAL_DRIVEN = {'msm', 'spy_msm', 'timeout_msm', 'causal', 'adwin', 'perf'}
-
-
-# ── HELPERS ──
-
-def get_experiment_type(name):
-    for prefix in EXP_TYPE_PREFIXES:
-        if name.startswith(prefix):
-            return prefix
-    return 'other'
-
-
-def in_stress_window(date):
-    return any(
-        (ev - pd.Timedelta(days=STRESS_WINDOW_DAYS))
-        <= date <=
-        (ev + pd.Timedelta(days=STRESS_WINDOW_DAYS))
-        for ev in STRESS_EVENTS.values()
-    )
+ROBUSTNESS_WINDOW_DAYS = [45, 60, 90, 120]  # local to analysis.py, keep here
 
 
 # ── LOADING ──

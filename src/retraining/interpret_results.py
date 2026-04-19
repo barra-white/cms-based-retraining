@@ -21,12 +21,16 @@ import os
 import textwrap
 import numpy as np
 import pandas as pd
+import config as cfg
+
+STRESS_EVENTS = cfg.STRESS_EVENTS
+STRESS_WINDOW_DAYS = cfg.STRESS_WINDOW_DAYS
+MSM_TYPES = cfg.MSM_TYPES
+BASELINE_TYPES = cfg.BASELINE_TYPES
+get_experiment_type = cfg.get_experiment_type
 
 ANALYSIS_DIR = 'results/analysis'
 W = 80
-
-MSM_TYPES      = {'msm', 'spy_msm', 'timeout_msm', 'causal'}
-BASELINE_TYPES = {'static', 'random', 'fixed'}
 
 
 def _h(title):
