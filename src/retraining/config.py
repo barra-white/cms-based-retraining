@@ -11,7 +11,7 @@ STRESS_WINDOW_DAYS = 60
 # Experiment type classification
 EXP_TYPE_PREFIXES = [
     'spy_msm', 'timeout_msm', 'msm', 'causal',
-    'fixed', 'perf', 'adwin', 'random', 'static',
+    'fixed', 'perf', 'adwin', 'random', 'static', 'drift_observer'
 ]
 
 # IMPORTANT: perf and adwin are now treated as baselines, not as "signal-driven"
