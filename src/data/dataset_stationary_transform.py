@@ -41,9 +41,20 @@ out['USEPUINDXD_ld'] = np.log(df["USEPUINDXD"] / df["USEPUINDXD"].shift(1))
 # today's value is normalised using only yesterday and earlier.
 # Stationary (passes ADF and KPSS), compatible with PCMCI+ assumptions.
 raw_spy_lr   = np.log(df['SPY'] / df['SPY'].shift(1))
+
 rolling_std  = raw_spy_lr.rolling(21, min_periods=21).std().shift(1)
 rolling_mean = raw_spy_lr.rolling(21, min_periods=21).mean().shift(1)
 out['SPY_lr_local_std'] = (raw_spy_lr - rolling_mean) / rolling_std
+
+forward_rv_5 = (raw_spy_lr ** 2).rolling(5).sum().shift(-4)  # 5-day realized volatility
+out['SPY_logrv_5d'] = np.log(forward_rv_5.clip(lower=1e-10))  # log to stabilise variance, clip to avoid -inf
+
+forward_rv_20 = (raw_spy_lr ** 2).rolling(20).sum().shift(-19)  # 20-day realized volatility
+out['SPY_logrv_20d'] = np.log(forward_rv_20.clip(lower=1e-10))  # log to stabilise variance, clip to avoid -
+
+trailing_rv_5 = (raw_spy_lr ** 2).rolling(5).sum() # 5-day trailing realized volatility
+vol_change = forward_rv_5 - trailing_rv_5 # change in volatility over the next 5 days compared to the past 5 days
+out['SPY_vol_change_5d'] = vol_change
 
 out.to_csv("data/processed/transformed_data.csv", index=False)
 print("Saved transformed data to data/processed/transformed_data.csv")

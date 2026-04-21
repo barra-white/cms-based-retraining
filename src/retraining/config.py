@@ -23,7 +23,7 @@ SIGNAL_DRIVEN  = {'msm', 'spy_msm', 'timeout_msm', 'causal', 'adwin', 'perf'}
 # Binning configuration — decision from diagnostic_v2
 # Fixed thresholds at ±0.3 standardised units give balanced classes
 # and regime-sensitive semantics without hiding distributional shifts.
-BINNING_SCHEME   = 'fixed_stdev'
+BINNING_SCHEME   = 'global_tertile'
 FIXED_THRESHOLD  = 0.3  # in standardised units (standard deviations)
 
 # Primary forecasting target
@@ -32,6 +32,8 @@ TARGET_PRIMARY = 'SPY_lr'
 # Secondary target for RQ1 lead-lag analysis
 # MSM Granger-causes this target (p=0.0022, lag=1)
 TARGET_SECONDARY = 'SPY_lr_local_std'
+
+FORECAST_HORIZON = 5
 
 # Helper functions
 def get_experiment_type(name):

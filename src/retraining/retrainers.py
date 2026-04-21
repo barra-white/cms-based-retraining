@@ -107,7 +107,7 @@ def _to_json(obj) -> str:
 # ============================================================================
 
 class BaseRetrainer(ABC):
-    def __init__(self, df, feature_cols, target, model_type='xgboost', n_bins=3, window=504, step=21, cooldown=3):
+    def __init__(self, df, feature_cols, target, model_type='xgboost', n_bins=3, window=504, step=21, cooldown=3, horizon=None):
         if model_type not in MODEL_CONFIGS:
             raise ValueError(f"Unsupported model_type '{model_type}'")
         self.df           = df
@@ -122,6 +122,7 @@ class BaseRetrainer(ABC):
         self.last_retrain_window = -999
         self.bin_edges    = None
         self.results      = []
+        self.horizon      = horizon if horizon is not None else getattr(cfg, 'FORECAST_HORIZON', 5)
 
     # ---- Binning: dispatches on config.BINNING_SCHEME ----
 
@@ -138,6 +139,16 @@ class BaseRetrainer(ABC):
         if cfg.BINNING_SCHEME == 'fixed_stdev':
             thr = cfg.FIXED_THRESHOLD
             self.bin_edges = np.array([-np.inf, -thr, thr, np.inf])
+            return
+        
+        if cfg.BINNING_SCHEME == 'global_tertile':
+            if self.freeze_bin_edges is not None:
+                return
+            train_vals = train_vals[~np.isnan(train_vals)]
+            if len(train_vals) == 0:
+                raise ValueError("freeze_bin_edges: no valid target values")
+            q1, q2 = np.quantile(train_vals, [1/3, 2/3]) # global tertiles for stable, regime-sensitive binning
+            self.bin_edges = np.array([-np.inf, q1, q2, np.inf])
             return
 
         # Fallback: original equal-frequency logic
@@ -256,7 +267,11 @@ class BaseRetrainer(ABC):
             test_end    = test_start + self.step
             if test_end > len(self.df):
                 continue
-
+            # Note: train_end is the last index of the training window, test_start is the first index of the test window
+            H = self.horizon
+            train_target_end = train_end - H
+            if train_target_end <= train_start+50:
+                continue
             candidate_cols = self._get_feature_cols_for_window(g)
             context   = self._compute_window_context(w, g, all_graphs)
             y_r_train = self._impute_target(self.df[self.target].iloc[train_start:train_end].values)
@@ -265,7 +280,7 @@ class BaseRetrainer(ABC):
             triggered, signal_fired, cooldown_active = False, False, False
 
             if w == 0 or model is None:
-                X_train = self._impute(self.df[candidate_cols].iloc[train_start:train_end].values)
+                X_train = self._impute(self.df[candidate_cols].iloc[train_start:train_target_end].values)
                 self.freeze_bin_edges(y_r_train)
                 y_train = self.apply_bins(y_r_train)
                 model = self.run_grid_search(X_train, y_train, warm=False)
@@ -275,7 +290,7 @@ class BaseRetrainer(ABC):
                 signal_fired    = self.should_retrain(w, g=g, all_graphs=all_graphs, **context)
                 cooldown_active = self.in_cooldown(w)
                 if signal_fired and not cooldown_active:
-                    X_train = self._impute(self.df[candidate_cols].iloc[train_start:train_end].values)
+                    X_train = self._impute(self.df[candidate_cols].iloc[train_start:train_target_end].values)
                     self.freeze_bin_edges(y_r_train)
                     y_train = self.apply_bins(y_r_train)
                     model = self.run_grid_search(X_train, y_train, warm=True)

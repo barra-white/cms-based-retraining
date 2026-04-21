@@ -211,7 +211,7 @@ def main():
 
     # Exclude the primary target AND the secondary target from features.
     # The secondary target is only used in lead_lag_analysis.py.
-    FEATURE_EXCLUSIONS = [
+    FEATURE_EXCLUSIONS = [ 
         'Date',
         'SPY_lr',  # primary target
         'SPY_lr_local_std',  # secondary target for lead-lag analysis
