@@ -3,6 +3,9 @@ import pickle
 import sys
 import traceback
 import random
+import warnings
+
+warnings.filterwarnings("ignore")
 
 import numpy as np
 import pandas as pd
@@ -28,7 +31,7 @@ np.random.seed(42)
 random.seed(42)
 
 # ----- RUN CONFIG -----
-RUN_SENSITIVITY = True
+RUN_SENSITIVITY = False
 
 
 # ----- SENSITIVITY CONFIGS -----
@@ -213,8 +216,9 @@ def main():
     # The secondary target is only used in lead_lag_analysis.py.
     FEATURE_EXCLUSIONS = [ 
         'Date',
-        'SPY_lr',  # primary target
         'SPY_lr_local_std',  # secondary target for lead-lag analysis
+        'SPY_logrv_5d',  # alternative secondary target with same horizon as primary, more noise
+        'SPY_logrv_20d',  # alternative secondary target with longer horizon,
     ]
     feature_cols = [c for c in df.columns if c not in FEATURE_EXCLUSIONS]
     # check if removed

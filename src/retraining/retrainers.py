@@ -142,7 +142,7 @@ class BaseRetrainer(ABC):
             return
         
         if cfg.BINNING_SCHEME == 'global_tertile':
-            if self.freeze_bin_edges is not None:
+            if self.bin_edges is not None:
                 return
             train_vals = train_vals[~np.isnan(train_vals)]
             if len(train_vals) == 0:
@@ -274,7 +274,7 @@ class BaseRetrainer(ABC):
                 continue
             candidate_cols = self._get_feature_cols_for_window(g)
             context   = self._compute_window_context(w, g, all_graphs)
-            y_r_train = self._impute_target(self.df[self.target].iloc[train_start:train_end].values)
+            y_r_train = self._impute_target(self.df[self.target].iloc[train_start:train_target_end].values)
             y_r_test  = self._impute_target(self.df[self.target].iloc[test_start:test_end].values)
 
             triggered, signal_fired, cooldown_active = False, False, False

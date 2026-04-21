@@ -32,6 +32,8 @@ TARGET_PRIMARY = 'SPY_lr'
 # Secondary target for RQ1 lead-lag analysis
 # MSM Granger-causes this target (p=0.0022, lag=1)
 TARGET_SECONDARY = 'SPY_lr_local_std'
+TARGET_ALTERNATIVE_LONG = 'SPY_logrv_20d'  # alternative secondary target with longer horizon, less noise
+TARGET_ALTERNATIVE_DIR = 'SPY_vol_change_5d'  # alternative secondary
 
 FORECAST_HORIZON = 5
 
