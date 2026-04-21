@@ -46,10 +46,10 @@ rolling_std  = raw_spy_lr.rolling(21, min_periods=21).std().shift(1)
 rolling_mean = raw_spy_lr.rolling(21, min_periods=21).mean().shift(1)
 out['SPY_lr_local_std'] = (raw_spy_lr - rolling_mean) / rolling_std
 
-forward_rv_5 = (raw_spy_lr ** 2).rolling(5).sum().shift(-4)  # 5-day realized volatility
+forward_rv_5 = (raw_spy_lr ** 2).rolling(5).sum().shift(-5)  # 5-day realized volatility
 out['SPY_logrv_5d'] = np.log(forward_rv_5.clip(lower=1e-10))  # log to stabilise variance, clip to avoid -inf
 
-forward_rv_20 = (raw_spy_lr ** 2).rolling(20).sum().shift(-19)  # 20-day realized volatility
+forward_rv_20 = (raw_spy_lr ** 2).rolling(20).sum().shift(-20)  # 20-day realized volatility
 out['SPY_logrv_20d'] = np.log(forward_rv_20.clip(lower=1e-10))  # log to stabilise variance, clip to avoid -
 
 trailing_rv_5 = (raw_spy_lr ** 2).rolling(5).sum() # 5-day trailing realized volatility

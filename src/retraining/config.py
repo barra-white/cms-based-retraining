@@ -27,7 +27,7 @@ BINNING_SCHEME   = 'global_tertile'
 FIXED_THRESHOLD  = 0.3  # in standardised units (standard deviations)
 
 # Primary forecasting target
-TARGET_PRIMARY = 'SPY_lr'
+TARGET_PRIMARY = 'SPY_logrv_5d'  # 5-day forward-looking log realized volatility, the main target for RQ1 and RQ2
 
 # Secondary target for RQ1 lead-lag analysis
 # MSM Granger-causes this target (p=0.0022, lag=1)

@@ -219,6 +219,7 @@ def main():
         'SPY_lr_local_std',  # secondary target for lead-lag analysis
         'SPY_logrv_5d',  # alternative secondary target with same horizon as primary, more noise
         'SPY_logrv_20d',  # alternative secondary target with longer horizon,
+        'SPY_vol_change_5d',  # alternative secondary target capturing direction of volatility change
     ]
     feature_cols = [c for c in df.columns if c not in FEATURE_EXCLUSIONS]
     # check if removed
@@ -236,14 +237,23 @@ def main():
     # IMPORTANT: graph variable names must NOT include SPY_lr_local_std
     # (the secondary target didn't exist when causal graphs were built).
     # The original 11 variables in the causal graphs:
+    # Causal graphs were built on the original variables including SPY_lr.
+    # SPY_logrv_5d did not exist when graphs were generated, so it is not
+    # a node in the graph. We monitor SPY_lr's causal structure as the
+    # market regime proxy — this is deliberately decoupled from the forecast
+    # target (SPY_logrv_5d). The MSM signal fires on return-graph breakdown,
+    # which theoretically precedes volatility regime shifts.
+    GRAPH_MONITOR_VAR = 'SPY_lr'
     graph_var_names = [
         c for c in df.columns
-        if c not in ('Date', cfg.TARGET_SECONDARY)
+        if c not in ('Date', cfg.TARGET_SECONDARY,
+                     'SPY_logrv_5d', 'SPY_logrv_20d', 'SPY_vol_change_5d')
     ]
-    if cfg.TARGET_PRIMARY not in graph_var_names:
-        raise ValueError(f"Target '{cfg.TARGET_PRIMARY}' not in columns.")
-    target_idx_in_graph = graph_var_names.index(cfg.TARGET_PRIMARY)
-    print(f"Target '{cfg.TARGET_PRIMARY}' is at graph index {target_idx_in_graph}")
+    if GRAPH_MONITOR_VAR not in graph_var_names:
+        raise ValueError(f"'{GRAPH_MONITOR_VAR}' missing from graph variables.")
+    target_idx_in_graph = graph_var_names.index(GRAPH_MONITOR_VAR)
+    print(f"Causal graph monitoring: '{GRAPH_MONITOR_VAR}' at index {target_idx_in_graph}")
+    print(f"Forecast target: '{cfg.TARGET_PRIMARY}'")
 
     base_args_temp = dict(
         df=df,
