@@ -22,7 +22,7 @@ os.makedirs('results/validation', exist_ok=True)
 
 df = pd.read_csv('data/processed/standardized_data.csv', parse_dates=['Date'])
 
-targets_to_test = ['SPY_logrv_5d', 'SPY_logrv_20d', 'SPY_vol_change_5d']
+targets_to_test = ['SPY_logrv_5d', 'SPY_logrv_20d']
 feature_cols = [c for c in df.columns if c not in ['Date'] + targets_to_test + ['SPY_lr', 'SPY_lr_local_std']]
 
 print(f'Features used: {feature_cols}')
@@ -71,8 +71,21 @@ for tgt in targets_to_test:
     y = y[1:]
 
     # Tertile bins on training data only
-    q = np.quantile(y[:split], [1/3, 2/3])
+        # Tertile bins: frozen from first 504-row window only (mirrors experiment.py).
+    # Using per-split quantiles would give best-case balanced classes and
+    # overestimate F1 relative to the actual experiment.
+    FREEZE_WINDOW = 504
+    freeze_vals = y[:FREEZE_WINDOW][~np.isnan(y[:FREEZE_WINDOW])]
+    q = np.quantile(freeze_vals, [1/3, 2/3])
     y_binned = np.digitize(y, q)
+    print(f"  {tgt}: frozen bin edges q1={q[0]:.4f}, q2={q[1]:.4f}")
+    counts = np.bincount(y_binned)
+    print(f"  {tgt}: full-series class distribution: {counts} "
+          f"({(counts / counts.sum()).round(3)})")
+    if (counts / counts.sum()).max() > 0.5:
+        print(f"  WARNING: severe class imbalance — GFC-era bin edges likely cause. "
+              f"Gate 2 F1 will be low regardless of signal. "
+              f"Consider restricting data to post-2010.")
 
     clf = LogisticRegression(max_iter=1000, class_weight='balanced')
     clf.fit(X_shifted[:split], y_binned[:split])

@@ -147,8 +147,21 @@ class BaseRetrainer(ABC):
             train_vals = train_vals[~np.isnan(train_vals)]
             if len(train_vals) == 0:
                 raise ValueError("freeze_bin_edges: no valid target values")
-            q1, q2 = np.quantile(train_vals, [1/3, 2/3]) # global tertiles for stable, regime-sensitive binning
+            q1, q2 = np.quantile(train_vals, [1/3, 2/3])
             self.bin_edges = np.array([-np.inf, q1, q2, np.inf])
+            # Diagnostic: warn loudly if the frozen edges produce a badly
+            # imbalanced distribution on the training data itself.
+            # With GFC-era training data, q2 can be very high, pushing most
+            # later observations into class 0 or 1 only.
+            counts = np.bincount(np.digitize(train_vals, self.bin_edges[1:-1]))
+            total  = len(train_vals)
+            fracs  = counts / total
+            print(f"  [freeze_bin_edges] edges frozen: q1={q1:.4f}, q2={q2:.4f}")
+            print(f"  [freeze_bin_edges] train class dist: {counts} ({fracs.round(3)})")
+            if fracs.max() > 0.5:
+                print(f"  [freeze_bin_edges] WARNING: class imbalance on training data "
+                      f"(max class frac={fracs.max():.3f}). "
+                      f"Consider starting training window after GFC (post-2010).")
             return
 
         # Fallback: original equal-frequency logic

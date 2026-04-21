@@ -45,7 +45,18 @@ PERFORMANCE_LOOKBACK   = [3, 4, 6]
 ADWIN_DELTAS    = [0.002, 0.005, 0.01, 0.05, 0.1]
 FIXED_INTERVALS = [3, 6, 9, 12]
 
-MSM_DEFAULT = ("msm_default", MSMRetrainer, {"tau_1": 0.83, "tau_2": 0.75, "lookback": 4})
+# SPYFocusedMSMRetrainer restricts the MSM signal to edges *into SPY_lr* only.
+# This is the theoretically correct default: your thesis claims that breakdown
+# of SPY_lr's causal structure signals an upcoming volatility regime shift.
+# Using the full-graph MSMRetrainer fires on ANY graph instability (e.g. GLD/OVX
+# noise) and dilutes the signal.
+# target_idx is resolved below after graph_var_names is constructed.
+MSM_DEFAULT_CLASS  = SPYFocusedMSMRetrainer
+MSM_DEFAULT_KWARGS = {"tau_1": 0.83, "tau_2": 0.75, "lookback": 4}
+
+
+# NOTE: 'target_idx' is added to MSM_DEFAULT_KWARGS after target_idx_in_graph
+# is computed — see the configs block in main().
 
 MODEL_TYPES = ['xgboost', 'lr', 'rf']
 
@@ -244,14 +255,34 @@ def main():
     # target (SPY_logrv_5d). The MSM signal fires on return-graph breakdown,
     # which theoretically precedes volatility regime shifts.
     GRAPH_MONITOR_VAR = 'SPY_lr'
-    graph_var_names = [
-        c for c in df.columns
-        if c not in ('Date', cfg.TARGET_SECONDARY,
-                     'SPY_logrv_5d', 'SPY_logrv_20d', 'SPY_vol_change_5d')
+
+    # CRITICAL: graph_var_names must match EXACTLY the 11 variables that were
+    # present when causal_graphs.pkl was built by the PCMCI+ run.
+    # The graphs store edge tuples as integer index pairs (i, j). If this list
+    # has a different ordering or length, every SPYFocusedMSMRetrainer lookup
+    # is silently wrong.
+    # The 11 original variables in order (verify against your PCMCI+ script):
+    ORIGINAL_GRAPH_VARS = [
+        'SPY_lr', 'GLD_lr', 'UUP_lr', 'USO_lr', 'VIX_ld',
+        'OVX', 'MOVE_d', 'T10Y2Y_d', 'BAA10Y_d', 'DGS10_d', 'USEPUINDXD_ld'
     ]
-    if GRAPH_MONITOR_VAR not in graph_var_names:
-        raise ValueError(f"'{GRAPH_MONITOR_VAR}' missing from graph variables.")
+    # Verify every expected variable is actually in df
+    missing = [v for v in ORIGINAL_GRAPH_VARS if v not in df.columns]
+    if missing:
+        raise ValueError(f"graph_var_names: expected variables missing from df: {missing}")
+    # Derive graph_var_names from df.columns but FORCE the ordering to match
+    # the original 11 variables so edge indices are never wrong.
+    graph_var_names = [v for v in ORIGINAL_GRAPH_VARS if v in df.columns]
+    extra = [c for c in df.columns if c not in ('Date',) + tuple(ORIGINAL_GRAPH_VARS)
+             and c not in (cfg.TARGET_SECONDARY, 'SPY_logrv_5d',
+                           'SPY_logrv_20d', 'SPY_vol_change_5d')]
+    if extra:
+        print(f"  WARNING: extra columns in df not in original graph vars (ignored): {extra}")
+    if len(graph_var_names) != 11:
+        raise ValueError(f"Expected 11 graph variables, got {len(graph_var_names)}: {graph_var_names}")
+
     target_idx_in_graph = graph_var_names.index(GRAPH_MONITOR_VAR)
+    print(f"graph_var_names ({len(graph_var_names)}): {graph_var_names}")
     print(f"Causal graph monitoring: '{GRAPH_MONITOR_VAR}' at index {target_idx_in_graph}")
     print(f"Forecast target: '{cfg.TARGET_PRIMARY}'")
 
@@ -290,12 +321,17 @@ def main():
                             'tau_1':           tau1,
                             'tau_2':           tau2,
                             'lookback':        lookback,
-                            'target_name':     cfg.TARGET_PRIMARY,
+                            'target_name':     GRAPH_MONITOR_VAR,
                             'graph_var_names': graph_var_names,
                             'all_features':    feature_cols,
                         }
                     ))
     else:
+        MSM_DEFAULT = (
+            "msm_default",
+            SPYFocusedMSMRetrainer,
+            {**MSM_DEFAULT_KWARGS, "target_idx": target_idx_in_graph}  # placeholder, resolved in main()
+        )
         configs = [
             ('static', StaticRetrainer, {}),
             MSM_DEFAULT,
