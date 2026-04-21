@@ -580,6 +580,41 @@ def msm_summary(df):
         ['model_type', 'msm_mean'], ascending=[True, True]
     ).reset_index(drop=True)
 
+def balanced_window_f1(df):
+    '''
+    Compute F1 only on test windows where all 3 classes are represented.
+    Windows where the test set lacks a class make macro-F1 degenerate
+    (max achievable is 2/3). With volatility regime persistence, many
+    windows contain only 1-2 classes, dragging average F1 down
+    independent of predictive skill.
+    '''
+    records = []
+    for (model, retrainer), grp in df.groupby(['model_type', 'retrainer']):
+        balanced_windows = []
+        all_windows = []
+        for _, row in grp.iterrows():
+            y_true = row['y_true']
+            if not y_true:
+                continue
+            classes = set(y_true)
+            all_windows.append(row['f1'])
+            if len(classes) == 3:
+                balanced_windows.append(row['f1'])
+        records.append({
+            'model_type': model,
+            'retrainer': retrainer,
+            'exp_type': get_experiment_type(retrainer),
+            'n_all_windows': len(all_windows),
+            'n_balanced_windows': len(balanced_windows),
+            'balanced_fraction': round(
+                len(balanced_windows) / max(len(all_windows), 1), 3
+            ),
+            'mean_f1_all': round(np.mean(all_windows), 4) if all_windows else np.nan,
+            'mean_f1_balanced': round(np.mean(balanced_windows), 4) if balanced_windows else np.nan,
+        })
+    return pd.DataFrame(records).sort_values(
+        ['model_type', 'mean_f1_balanced'], ascending=[True, False]
+    ).reset_index(drop=True)
 
 # ── MAIN ──
 
@@ -601,7 +636,7 @@ def main():
     _save(per_class, 'per_class_f1.csv')
     _save(wide_per_class_f1(per_class), 'per_class_f1_wide.csv')
     _save(aggregate, 'aggregate_metrics.csv')
-
+    _save(balanced_window_f1(df), 'balanced_window_f1.csv')
     _save(detection_latency(df),   'detection_latency.csv')
     _save(false_positive_rate(df), 'false_positive_rate.csv')
     _save(best_configs(df),        'best_configs.csv')

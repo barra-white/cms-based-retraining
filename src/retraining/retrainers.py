@@ -130,59 +130,64 @@ class BaseRetrainer(ABC):
         '''
         Set bin edges based on config.BINNING_SCHEME.
 
-        'fixed_stdev':      thresholds at ±FIXED_THRESHOLD in standardised units.
-                            Regime-invariant. Ignores train_vals.
-                            Chosen by binning_diagnostic_v2 (B_fixed_stdev_0.3).
-        'equal_frequency':  original per-window quantile scheme. Kept for
-                            backwards-compat testing; not used by default.
+        'fixed_stdev'    : thresholds at ±FIXED_THRESHOLD. Ignores train_vals.
+        'global_tertile' : tertiles frozen from FIRST training window; locked thereafter.
+        'equal_frequency': per-window quantile (legacy).
         '''
+        if cfg.BINNING_SCHEME == 'integer_labels':
+            # Target values are already integer labels (0/1/2).
+            # Edges at 0.5 and 1.5 so digitize returns exactly the same labels.
+            self.bin_edges = np.array([-np.inf, 0.5, 1.5, np.inf])
+            # Diagnostic once per retrainer on first call
+            if not hasattr(self, '_bin_logged'):
+                vals = train_vals[~np.isnan(train_vals)]
+                counts = np.bincount(vals.astype(int), minlength=3)
+                fracs = counts / counts.sum() if counts.sum() else np.zeros(3)
+                print(f"  [freeze_bin_edges] integer_labels scheme; train class dist: "
+                    f"{counts.tolist()} (fracs={fracs.round(3).tolist()})")
+                self._bin_logged = True
+            return
+        
+        
         if cfg.BINNING_SCHEME == 'fixed_stdev':
             thr = cfg.FIXED_THRESHOLD
             self.bin_edges = np.array([-np.inf, -thr, thr, np.inf])
             return
-        
+
         if cfg.BINNING_SCHEME == 'global_tertile':
+            # Freeze once on first call; subsequent calls are no-ops.
             if self.bin_edges is not None:
                 return
-            train_vals = train_vals[~np.isnan(train_vals)]
-            if len(train_vals) == 0:
-                raise ValueError("freeze_bin_edges: no valid target values")
-            q1, q2 = np.quantile(train_vals, [1/3, 2/3])
+            vals = train_vals[~np.isnan(train_vals)]
+            if len(vals) == 0:
+                raise ValueError("freeze_bin_edges: no valid target values in initial window")
+            q1, q2 = np.quantile(vals, [1/3, 2/3])
             self.bin_edges = np.array([-np.inf, q1, q2, np.inf])
-            # Diagnostic: warn loudly if the frozen edges produce a badly
-            # imbalanced distribution on the training data itself.
-            # With GFC-era training data, q2 can be very high, pushing most
-            # later observations into class 0 or 1 only.
-            counts = np.bincount(np.digitize(train_vals, self.bin_edges[1:-1]))
-            total  = len(train_vals)
-            fracs  = counts / total
+
+            counts = np.bincount(np.digitize(vals, self.bin_edges[1:-1]), minlength=3)
+            fracs  = counts / counts.sum()
             print(f"  [freeze_bin_edges] edges frozen: q1={q1:.4f}, q2={q2:.4f}")
-            print(f"  [freeze_bin_edges] train class dist: {counts} ({fracs.round(3)})")
+            print(f"  [freeze_bin_edges] train class dist: {counts.tolist()} "
+                f"(fracs={fracs.round(3).tolist()})")
             if fracs.max() > 0.5:
-                print(f"  [freeze_bin_edges] WARNING: class imbalance on training data "
-                      f"(max class frac={fracs.max():.3f}). "
-                      f"Consider starting training window after GFC (post-2010).")
+                print(f"  [freeze_bin_edges] WARNING: training class imbalance "
+                    f"(max class frac={fracs.max():.3f}).")
             return
 
-        # Fallback: original equal-frequency logic
-        train_vals = train_vals[~np.isnan(train_vals)]
-        if len(train_vals) == 0:
+        # Legacy equal_frequency fallback
+        vals = train_vals[~np.isnan(train_vals)]
+        if len(vals) == 0:
             raise ValueError("freeze_bin_edges: no valid target values")
-
-        n = len(train_vals)
-        sorted_vals = np.sort(train_vals)
-        boundary_idxs  = [int(n * k / self.n_bins) for k in range(1, self.n_bins)]
-        interior_edges = [
-            (sorted_vals[i - 1] + sorted_vals[i]) / 2.0
-            for i in boundary_idxs
-        ]
-        interior_edges = sorted(set(interior_edges))
-
+        n = len(vals)
+        sorted_vals = np.sort(vals)
+        boundary_idxs = [int(n * k / self.n_bins) for k in range(1, self.n_bins)]
+        interior_edges = sorted(set(
+            (sorted_vals[i - 1] + sorted_vals[i]) / 2.0 for i in boundary_idxs
+        ))
         if len(interior_edges) < self.n_bins - 1:
             unique_vals = np.unique(sorted_vals)
             quantiles = np.linspace(0, 1, self.n_bins + 1)[1:-1]
             interior_edges = sorted(set(np.quantile(unique_vals, quantiles).tolist()))
-
         self.bin_edges = np.array([-np.inf] + interior_edges + [np.inf])
 
     def apply_bins(self, vals):
@@ -202,10 +207,28 @@ class BaseRetrainer(ABC):
         return config['class'](**all_params)
 
     def _impute(self, X):
-        return pd.DataFrame(X).ffill().fillna(0).values
+        '''Forward-fill NaN. Raise if column is entirely NaN — silent fillna(0)
+        corrupts the training signal when it fires on bugs.'''
+        X_df = pd.DataFrame(X).ffill()
+        if X_df.isna().any().any():
+            # If ffill can't fill (leading NaNs), use column mean from non-NaN values
+            col_means = X_df.mean(axis=0)
+            if col_means.isna().any():
+                bad = col_means[col_means.isna()].index.tolist()
+                raise ValueError(f"_impute: columns entirely NaN: {bad}")
+            X_df = X_df.fillna(col_means)
+        return X_df.values
 
     def _impute_target(self, y):
-        return pd.Series(y).ffill().fillna(0).values
+        '''Forward-fill target NaN. Raise if target is entirely NaN.'''
+        y_ser = pd.Series(y).ffill()
+        if y_ser.isna().any():
+            # Leading NaNs — fill with training-window mean
+            mean_val = y_ser.mean()
+            if pd.isna(mean_val):
+                raise ValueError("_impute_target: target entirely NaN in this window")
+            y_ser = y_ser.fillna(mean_val)
+        return y_ser.values
 
     def _full_grid(self):
         return MODEL_CONFIGS[self.model_type]['grid']

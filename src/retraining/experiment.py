@@ -31,7 +31,7 @@ np.random.seed(42)
 random.seed(42)
 
 # ----- RUN CONFIG -----
-RUN_SENSITIVITY = False
+RUN_SENSITIVITY = True
 
 
 # ----- SENSITIVITY CONFIGS -----
@@ -59,6 +59,7 @@ MSM_DEFAULT_KWARGS = {"tau_1": 0.83, "tau_2": 0.75, "lookback": 4}
 # is computed — see the configs block in main().
 
 MODEL_TYPES = ['xgboost', 'lr', 'rf']
+MODEL_TYPES = ['lr']
 
 
 # ----- CONFIG BUILDERS -----
@@ -231,6 +232,7 @@ def main():
         'SPY_logrv_5d',  # alternative secondary target with same horizon as primary, more noise
         'SPY_logrv_20d',  # alternative secondary target with longer horizon,
         'SPY_vol_change_5d',  # alternative secondary target capturing direction of volatility change
+        'SPY_vol_direction_5d',  # primary target for classification, also excluded from features
     ]
     feature_cols = [c for c in df.columns if c not in FEATURE_EXCLUSIONS]
     # check if removed
