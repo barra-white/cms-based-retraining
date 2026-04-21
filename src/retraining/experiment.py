@@ -202,7 +202,6 @@ def main():
     print('Loading data...')
     df = pd.read_csv("data/processed/standardized_data.csv", parse_dates=['Date'])
 
-    # FIX: drop leading NaN rows to align with generate_causal_graphs.py's
     # index convention. Without this, every training window is offset by 1.
     feature_cols_for_drop = [c for c in df.columns if c != 'Date']
     df = df.dropna(subset=feature_cols_for_drop).reset_index(drop=True)
@@ -212,11 +211,19 @@ def main():
 
     # Exclude the primary target AND the secondary target from features.
     # The secondary target is only used in lead_lag_analysis.py.
-    feature_cols = [
-        c for c in df.columns
-        if c not in ('Date', cfg.TARGET_PRIMARY, cfg.TARGET_SECONDARY)
+    FEATURE_EXCLUSIONS = [
+        'Date',
+        'SPY_lr',  # primary target
+        'SPY_lr_local_std',  # secondary target for lead-lag analysis
     ]
-
+    feature_cols = [c for c in df.columns if c not in FEATURE_EXCLUSIONS]
+    # check if removed
+    assert cfg.TARGET_PRIMARY not in feature_cols, f"{cfg.TARGET_PRIMARY} should not be in features."
+    assert cfg.TARGET_SECONDARY not in feature_cols, f"{cfg.TARGET_SECONDARY} should not be in features."
+    print(f'Features (n={len(feature_cols)}): {feature_cols}')
+    
+    df[feature_cols] = df[feature_cols].shift(1)  # shift features by 1 to prevent lookahead bias
+    
     print(f'Observations: {len(df)}')
     print(f'Features: {len(feature_cols)}')
     print(f'Graph windows: {len(all_graphs)}')
@@ -243,8 +250,7 @@ def main():
         window=504,
         step=21,
         cooldown=3,
-    )
-
+    )   
     configs = []
 
     if RUN_SENSITIVITY:
@@ -276,8 +282,10 @@ def main():
                         }
                     ))
     else:
-        configs += [MSM_DEFAULT]
-        print(f'DEV MODE: {len(configs)} configurations.')
+        configs = [
+            ('static', StaticRetrainer, {}),
+            MSM_DEFAULT,
+        ] 
 
     os.makedirs("results/experiments", exist_ok=True)
     for m in MODEL_TYPES:

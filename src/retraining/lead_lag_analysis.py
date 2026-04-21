@@ -181,7 +181,7 @@ def main():
     overlay_data = {}
 
     for model in MODELS:
-        path = f'results/experiments/{model}/other/drift_observer_results.csv'
+        path = f'results/experiments/{model}/drift_observer/drift_observer_results.csv'
         if not os.path.exists(path):
             print(f'  [SKIP] {path} not found')
             continue

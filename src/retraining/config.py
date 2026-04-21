@@ -31,7 +31,7 @@ TARGET_PRIMARY = 'SPY_lr'
 
 # Secondary target for RQ1 lead-lag analysis
 # MSM Granger-causes this target (p=0.0022, lag=1)
-TARGET_SECONDARY = 'spy_lr_local_std'
+TARGET_SECONDARY = 'SPY_lr_local_std'
 
 # Helper functions
 def get_experiment_type(name):

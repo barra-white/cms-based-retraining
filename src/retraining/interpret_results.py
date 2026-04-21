@@ -16,13 +16,6 @@ Sections:
     8. Causal feature usage
     9. Lead-lag analysis (RQ1 evidence)
     10. Bootstrap F1 confidence intervals
-
-Changes from original:
-    - Imports from config.py (BASELINE_TYPES now includes perf and adwin)
-    - Added section_lead_lag (primary RQ1 evidence; was missing)
-    - Added section_aggregate_metrics (MCC, kappa, weighted F1)
-    - Added section_bootstrap_ci
-    - Removed section_bin_control (fixed-stdev binning makes it obsolete)
 '''
 
 import os
