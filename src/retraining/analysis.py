@@ -593,6 +593,31 @@ def qlike_summary(df):
     ).astype(int)
     return out
 
+def transition_period_rmse(df):
+    """RMSE during ±10-day transition windows vs calm. This is where MSM
+    advantage should appear, not in sustained-stress periods."""
+    data = df.copy()
+    data['regime'] = data['date_start'].apply(
+        lambda d: 'transition' if cfg.in_transition_window(d) else 'calm'
+    )
+    agg = (
+        data.groupby(['model_type', 'retrainer', 'exp_type', 'regime'])
+        .agg(mean_rmse=('rmse', 'mean'), std_rmse=('rmse', 'std'), n=('rmse', 'count'))
+        .round(4).reset_index()
+    )
+    pivot = agg.pivot_table(
+        index=['model_type', 'retrainer', 'exp_type'],
+        columns='regime', values=['mean_rmse', 'n'],
+    )
+    pivot.columns = ['_'.join(c).strip() for c in pivot.columns]
+    if 'mean_rmse_transition' in pivot.columns and 'mean_rmse_calm' in pivot.columns:
+        pivot['rmse_transition_minus_calm'] = (
+            pivot['mean_rmse_transition'] - pivot['mean_rmse_calm']
+        ).round(4)
+    return pivot.reset_index().sort_values(
+        ['model_type', 'rmse_transition_minus_calm'], ascending=[True, True]
+    )
+
 # ── MAIN ──
 
 def main():
@@ -615,6 +640,7 @@ def main():
     _save(retrain_efficiency(df),   'retrain_efficiency.csv')
     _save(cooldown_analysis(df),    'cooldown_analysis.csv')
     _save(stress_period_rmse(df),   'stress_period_rmse.csv')
+    _save(transition_period_rmse(df), 'transition_period_rmse.csv')
     _save(qlike_summary(df),         'qlike_summary.csv')
 
     sens = sensitivity_summary(df)

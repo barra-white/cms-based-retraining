@@ -8,6 +8,17 @@ STRESS_EVENTS = {
 }
 STRESS_WINDOW_DAYS = 60
 
+
+TRANSITION_WINDOW_DAYS = 10  # ±10 days around event = regime transition zone
+
+def in_transition_window(date, events=None, window_days=None):
+    events = events or STRESS_EVENTS
+    window_days = window_days or TRANSITION_WINDOW_DAYS
+    return any(
+        (ev - pd.Timedelta(days=window_days)) <= date <= (ev + pd.Timedelta(days=window_days))
+        for ev in events.values()
+    )
+
 # Experiment type classification
 EXP_TYPE_PREFIXES = [
     'spy_msm', 'timeout_msm', 'msm', 'causal',
