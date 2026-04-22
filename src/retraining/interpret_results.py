@@ -383,6 +383,50 @@ def section_bootstrap_ci(L):
                 L.append(_f('FINDING',
                     'CIs do not overlap — RMSE difference is genuine.'))
 
+#    11. QLIKE loss (Patton 2011 secondary metric)
+def section_qlike(L):
+    L.append(_h('11. QLIKE LOSS (Patton 2011 — vol literature standard)'))
+    df = _load('qlike_summary.csv')
+    if df is None or df.empty:
+        L.append('  [MISSING] qlike_summary.csv — re-run experiment.py and analysis.py')
+        return
+
+    L.append('')
+    L.append('  QLIKE = E[RV_true/RV_pred - log(RV_true/RV_pred) - 1]')
+    L.append('  Lower = better. Penalises underprediction of variance asymmetrically.')
+    L.append('  This is the accepted secondary metric in the HAR/Corsi vol literature.')
+
+    for model, grp in df.groupby('model_type'):
+        L.append(_sub(f'Model: {model}'))
+        grp = grp.sort_values('mean_qlike', ascending=True).reset_index(drop=True)
+        top = grp.iloc[0]
+        L.append(_f('FINDING',
+            f"Best QLIKE: '{top['retrainer']}' "
+            f"(QLIKE={top['mean_qlike']:.6f} ±{top['std_qlike']:.6f})"))
+
+        msm  = grp[grp['exp_type'].isin(MSM_TYPES)]
+        base = grp[grp['exp_type'].isin(BASELINE_TYPES)]
+        if not msm.empty and not base.empty:
+            bm = msm.iloc[0]
+            bb = base.iloc[0]
+            delta = bm['mean_qlike'] - bb['mean_qlike']
+            L.append(_f('DETAIL',
+                f"Best MSM: '{bm['retrainer']}' QLIKE={bm['mean_qlike']:.6f} | "
+                f"Best baseline: '{bb['retrainer']}' QLIKE={bb['mean_qlike']:.6f} | "
+                f"Diff (MSM-baseline): {delta:+.6f}  (negative => MSM better)"))
+            if delta < 0:
+                L.append(_f('FINDING',
+                    'MSM produces lower QLIKE than best baseline. '
+                    'Confirms RMSE finding under asymmetric vol loss.'))
+            else:
+                L.append(_f('CONCERN',
+                    'MSM does not win on QLIKE despite winning on RMSE. '
+                    'MSM may be systematically underpredicting variance. '
+                    'Check rv_pred distribution vs rv_true.'))
+
+        L.append('  QLIKE by type (ascending):')
+        for exp, q in grp.groupby('exp_type')['mean_qlike'].mean().sort_values().items():
+            L.append(f'    {exp:<20} {q:.6f}{_tag(exp)}')
 
 def main():
     lines = [
@@ -402,6 +446,7 @@ def main():
     section_features(lines)
     section_lead_lag(lines)
     section_bootstrap_ci(lines)
+    section_qlike(lines)
 
     report = '\n'.join(lines)
     print(report)

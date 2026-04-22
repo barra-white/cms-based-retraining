@@ -181,7 +181,11 @@ class BaseRetrainer(ABC):
             r2 = float(r2_score(y_test, pred))
         else:
             r2 = np.nan
-        return rmse, mae, r2, pred, y_test
+        # qlike
+        rv_true = np.exp(y_test)
+        rv_pred = np.clip(np.exp(pred), 1e-10, None)
+        qlike = np.mean(rv_true / rv_pred - np.log(rv_pred / rv_true) - 1)
+        return rmse, mae, r2, qlike, pred, y_test
 
     def in_cooldown(self, w):
         return (w - self.last_retrain_window) < self.cooldown
@@ -254,7 +258,7 @@ class BaseRetrainer(ABC):
 
             X_test = self._impute(self.df[model_feature_cols].iloc[test_start:test_end].values)
             y_test = y_r_test
-            rmse, mae, r2, pred, y_true = self.evaluate(model, X_test, y_test)
+            rmse, mae, r2, qlike, pred, y_true = self.evaluate(model, X_test, y_test)
 
             result = {
                 'window':                w + 1,
@@ -268,6 +272,7 @@ class BaseRetrainer(ABC):
                 'rmse':                  round(rmse, 6),
                 'mae':                   round(mae, 6),
                 'r2':                    round(r2, 6) if not np.isnan(r2) else np.nan,
+                'qlike':                 round(qlike, 6),
                 'y_true':                _to_json(y_true.tolist()),
                 'y_pred':                _to_json(pred.tolist()),
                 'best_params':           _to_json(self.best_params),

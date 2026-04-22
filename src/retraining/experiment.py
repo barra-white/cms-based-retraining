@@ -55,7 +55,6 @@ MSM_DEFAULT_KWARGS = {"tau_1": 0.83, "tau_2": 0.75, "lookback": 4}
 
 
 MODEL_TYPES = ['xgboost', 'lr', 'rf']
-MODEL_TYPES = ['lr']
 
 
 # ----- CONFIG BUILDERS -----
@@ -180,6 +179,7 @@ def run_experiment(name, cls, kwargs, base_args, all_graphs):
     print(f'\n\tmean rmse  : {results["rmse"].mean():.4f}')
     print(f'\tmean mae   : {results["mae"].mean():.4f}')
     print(f'\tmean r2    : {results["r2"].mean():.4f}')
+    print(f'\tmean qlike  : {results["qlike"].mean():.4f}')
     print(f'\tretrains   : {results["retrain_triggered"].sum()}')
     print(f'\tsignals    : {results["signal_fired"].sum()}')
     print(f'\tcooldowns  : {results["cooldown_active"].sum()}')
@@ -199,6 +199,7 @@ def print_summary(combined):
             std_rmse=('rmse', 'std'),
             retrains=('retrain_triggered', 'sum'),
             windows=('rmse', 'count'),
+            mean_qlike=('qlike', 'mean'),
         )
         .round(4)
         .sort_values('mean_rmse', ascending=True)

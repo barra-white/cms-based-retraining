@@ -94,6 +94,8 @@ def overall_summary(df):
             median_rmse=('rmse', 'median'),
             mean_mae=('mae', 'mean'),
             mean_r2=('r2', 'mean'),
+            mean_qlike=('qlike', 'mean'),   # ← ADD
+            std_qlike=('qlike', 'std'),     # ← ADD
             retrains=('retrain_triggered', 'sum'),
             signals_fired=('signal_fired', 'sum'),
             cooldowns_hit=('cooldown_active', 'sum'),
@@ -103,7 +105,6 @@ def overall_summary(df):
         .sort_values(['model_type', 'mean_rmse'], ascending=[True, True])
         .reset_index()
     )
-    # Lower RMSE wins → ascending rank.
     out['rank_within_model'] = out.groupby('model_type')['mean_rmse'].rank(
         ascending=True, method='min'
     ).astype(int)
@@ -113,39 +114,38 @@ def overall_summary(df):
 # ── 2. AGGREGATE REGRESSION METRICS (pooled y_true/y_pred) ──
 
 def regression_metrics(df):
-    '''
-    Pool all per-window predictions per (model, retrainer) and compute regression
-    metrics on the flat arrays. Replaces the old per-class F1 / MCC / kappa
-    block. Produces rmse, mae, r2, pearson_r, pearson_p.
-    '''
     records = []
-
     for (model, retrainer), grp in df.groupby(['model_type', 'retrainer']):
         y_true = np.asarray(sum(grp['y_true'].tolist(), []), dtype=float)
         y_pred = np.asarray(sum(grp['y_pred'].tolist(), []), dtype=float)
 
         if len(y_true) < 2 or np.var(y_true) == 0:
-            rmse = mae = r2 = pearson_r = pearson_p = np.nan
+            rmse = mae = r2 = pearson_r = pearson_p = qlike = np.nan
         else:
-            rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
-            mae  = float(mean_absolute_error(y_true, y_pred))
-            r2   = float(r2_score(y_true, y_pred))
+            rmse  = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+            mae   = float(mean_absolute_error(y_true, y_pred))
+            r2    = float(r2_score(y_true, y_pred))
             try:
                 pearson_r, pearson_p = pearsonr(y_true, y_pred)
                 pearson_r = float(pearson_r)
                 pearson_p = float(pearson_p)
             except Exception:
                 pearson_r = pearson_p = np.nan
+            # Pooled QLIKE on log-RV arrays
+            rv_true = np.exp(y_true)
+            rv_pred = np.clip(np.exp(y_pred), 1e-10, None)
+            qlike   = float(np.mean(rv_true / rv_pred - np.log(rv_true / rv_pred) - 1))
 
         records.append({
             'model_type':   model,
             'retrainer':    retrainer,
             'exp_type':     get_experiment_type(retrainer),
-            'rmse':         round(rmse, 6) if not np.isnan(rmse) else np.nan,
-            'mae':          round(mae, 6) if not np.isnan(mae) else np.nan,
-            'r2':           round(r2, 6) if not np.isnan(r2) else np.nan,
-            'pearson_r':    round(pearson_r, 6) if not np.isnan(pearson_r) else np.nan,
-            'pearson_p':    round(pearson_p, 6) if not np.isnan(pearson_p) else np.nan,
+            'rmse':         round(rmse,     6) if not np.isnan(rmse)     else np.nan,
+            'mae':          round(mae,      6) if not np.isnan(mae)      else np.nan,
+            'r2':           round(r2,       6) if not np.isnan(r2)       else np.nan,
+            'qlike':        round(qlike,    6) if not np.isnan(qlike)    else np.nan,   # ← ADD
+            'pearson_r':    round(pearson_r,6) if not np.isnan(pearson_r)else np.nan,
+            'pearson_p':    round(pearson_p,6) if not np.isnan(pearson_p)else np.nan,
             'n_points':     len(y_true),
         })
 
@@ -568,6 +568,31 @@ def msm_summary(df):
     ).reset_index(drop=True)
 
 
+# --- QLIKE SUMMARY (added as metric in retrainers.py) ---
+def qlike_summary(df):
+    """
+    Per-window mean QLIKE per strategy, ranked ascending (lower = better).
+    MSM vs baseline comparison mirrors overall_summary but on QLIKE.
+    """
+    if 'qlike' not in df.columns:
+        return pd.DataFrame()
+    out = (
+        df.groupby(['model_type', 'retrainer', 'exp_type'])
+        .agg(
+            mean_qlike=('qlike', 'mean'),
+            std_qlike=('qlike', 'std'),
+            median_qlike=('qlike', 'median'),
+            windows=('qlike', 'count'),
+        )
+        .round(6)
+        .sort_values(['model_type', 'mean_qlike'], ascending=[True, True])
+        .reset_index()
+    )
+    out['qlike_rank'] = out.groupby('model_type')['mean_qlike'].rank(
+        ascending=True, method='min'
+    ).astype(int)
+    return out
+
 # ── MAIN ──
 
 def main():
@@ -590,6 +615,7 @@ def main():
     _save(retrain_efficiency(df),   'retrain_efficiency.csv')
     _save(cooldown_analysis(df),    'cooldown_analysis.csv')
     _save(stress_period_rmse(df),   'stress_period_rmse.csv')
+    _save(qlike_summary(df),         'qlike_summary.csv')
 
     sens = sensitivity_summary(df)
     if not sens.empty:
