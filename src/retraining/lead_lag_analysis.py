@@ -1,8 +1,8 @@
 '''
-lead_lag_analysis.py — RQ1 evidence.
+lead_lag_analysis.py — RQ1 evidence (regression task).
 
 Uses the DriftSignalObserver output (frozen model) to test whether MSM
-predictively leads (a) F1 degradation and (b) SPY_lr_local_std.
+predictively leads (a) RMSE degradation and (b) SPY_lr_local_std.
 
 Outputs:
     results/analysis/lead_lag_results.csv
@@ -191,11 +191,11 @@ def main():
 
         msm_graph = obs['graph_msm'].values
         msm_spy   = obs['spy_msm'].values if 'spy_msm' in obs.columns else np.full(len(obs), np.nan)
-        f1        = obs['f1'].values
+        rmse      = obs['rmse'].values
         target_secondary = align_target_to_windows(obs, full_df, cfg.TARGET_SECONDARY)
 
         signals = {'graph_msm': msm_graph, 'spy_msm': msm_spy}
-        targets = {'F1': f1, cfg.TARGET_SECONDARY: target_secondary}
+        targets = {'RMSE': rmse, cfg.TARGET_SECONDARY: target_secondary}
 
         for sig_name, sig_series in signals.items():
             for tgt_name, tgt_series in targets.items():
@@ -227,7 +227,7 @@ def main():
                 })
 
         plot_data[model] = {
-            'MSM vs F1':                      cross_corr(msm_graph, f1),
+            'MSM vs RMSE':                    cross_corr(msm_graph, rmse),
             f'MSM vs {cfg.TARGET_SECONDARY}': cross_corr(msm_graph, target_secondary),
         }
         overlay_data[model] = (obs, target_secondary)

@@ -1,7 +1,8 @@
 '''
-drift_analysis.py — Visualise drift signals vs forecast performance.
+drift_analysis.py — Visualise drift signals vs forecast performance (regression).
 
-Complements lead_lag_analysis.py with retrainer-output-based visualisations.
+Performance axis is RMSE (lower = better). "Best MSM" = MSM variant with the
+lowest mean RMSE.
 
 Run after analysis.py.
 
@@ -11,7 +12,7 @@ Outputs:
     results/plots/fig_08_causal_structure_collapse.png
     results/plots/fig_12_lead_lag_retrainer_{model}.png
     results/analysis/drift_summary.csv
-    results/analysis/msm_f1_lead_lag_retrainer.csv
+    results/analysis/msm_rmse_lead_lag_retrainer.csv
 '''
 
 import os
@@ -60,10 +61,11 @@ def _shade_stress(ax):
 
 
 def _best_msm_name(model_df):
+    '''Best MSM = lowest mean RMSE.'''
     msm = model_df[model_df['exp_type'].isin(MSM_TYPES - {'causal'})]
     if msm.empty:
         return None
-    return msm.groupby('retrainer')['f1'].mean().idxmax()
+    return msm.groupby('retrainer')['rmse'].mean().idxmin()
 
 
 def plot_msm_drift_signal(df):
@@ -105,17 +107,17 @@ def plot_msm_drift_signal(df):
         ax_top.legend(loc='lower left', fontsize=8, ncol=2)
         ax_top.grid(alpha=0.2)
 
-        msm_f1 = best.set_index('date_end')['f1'].rolling(5, min_periods=1).mean()
-        static_f1 = (static.set_index('date_end')['f1'].rolling(5, min_periods=1).mean()
-                     if not static.empty else pd.Series(dtype=float))
-        ax_bot.plot(msm_f1.index, msm_f1.values, color='#1976D2', lw=1.2,
+        msm_rmse = best.set_index('date_end')['rmse'].rolling(5, min_periods=1).mean()
+        static_rmse = (static.set_index('date_end')['rmse'].rolling(5, min_periods=1).mean()
+                       if not static.empty else pd.Series(dtype=float))
+        ax_bot.plot(msm_rmse.index, msm_rmse.values, color='#1976D2', lw=1.2,
                     label='MSM (best)')
-        if not static_f1.empty:
-            ax_bot.plot(static_f1.index, static_f1.values, color='#757575', lw=1.2,
+        if not static_rmse.empty:
+            ax_bot.plot(static_rmse.index, static_rmse.values, color='#757575', lw=1.2,
                         label='Static')
         _shade_stress(ax_bot)
         ax_bot.set_xlabel('Window end date')
-        ax_bot.set_ylabel('F1 (5-window rolling mean)')
+        ax_bot.set_ylabel('RMSE (5-window rolling mean)')
         ax_bot.legend(loc='lower left', fontsize=8)
         ax_bot.grid(alpha=0.2)
 
@@ -164,7 +166,7 @@ def plot_causal_structure_collapse(df):
     msm_sub = df[df['exp_type'].isin(MSM_TYPES - {'causal'})]
     if msm_sub.empty:
         return
-    best_name = msm_sub.groupby('retrainer')['f1'].mean().idxmax()
+    best_name = msm_sub.groupby('retrainer')['rmse'].mean().idxmin()
     best_msm  = msm_sub[msm_sub['retrainer'] == best_name].sort_values('date_end')
 
     fig, ax1 = plt.subplots(figsize=(10, 4.5))
@@ -200,46 +202,57 @@ def plot_causal_structure_collapse(df):
 
 
 def compute_lead_lag_retrainer(df, max_lag=10):
+    '''
+    Cross-correlation between MSM and RMSE on the best-MSM retrainer output.
+    Positive peak lag ⇒ MSM leads RMSE rise (MSM is an early warning of
+    forecast degradation).
+    '''
     records = []
     for model, model_df in df.groupby('model_type'):
         msm_sub = model_df[model_df['exp_type'].isin(MSM_TYPES - {'causal'})]
         if msm_sub.empty or 'graph_msm' not in msm_sub.columns:
             continue
-        best_name = msm_sub.groupby('retrainer')['f1'].mean().idxmax()
+        best_name = msm_sub.groupby('retrainer')['rmse'].mean().idxmin()
         series = msm_sub[msm_sub['retrainer'] == best_name].sort_values('date_start')
 
-        msm = series['graph_msm'].values
-        f1  = series['f1'].values
-        valid = ~(np.isnan(msm) | np.isnan(f1))
-        msm, f1 = msm[valid], f1[valid]
+        msm  = series['graph_msm'].values
+        rmse = series['rmse'].values
+        valid = ~(np.isnan(msm) | np.isnan(rmse))
+        msm, rmse = msm[valid], rmse[valid]
 
         if len(msm) < max_lag + 5:
             continue
 
         for lag in range(-max_lag, max_lag + 1):
             if lag > 0:
-                x, y = msm[:-lag], f1[lag:]
+                x, y = msm[:-lag], rmse[lag:]
             elif lag < 0:
-                x, y = msm[-lag:], f1[:lag]
+                x, y = msm[-lag:], rmse[:lag]
             else:
-                x, y = msm, f1
+                x, y = msm, rmse
             corr = np.corrcoef(x, y)[0, 1]
             records.append({'model_type': model, 'retrainer': best_name,
                             'lag': lag, 'correlation': round(corr, 4)})
 
     result = pd.DataFrame(records)
     if not result.empty:
-        result.to_csv(os.path.join(ANALYSIS_DIR, 'msm_f1_lead_lag_retrainer.csv'), index=False)
+        result.to_csv(os.path.join(ANALYSIS_DIR, 'msm_rmse_lead_lag_retrainer.csv'), index=False)
 
         for model, grp in result.groupby('model_type'):
             fig, ax = plt.subplots(figsize=(7, 4))
             ax.bar(grp['lag'], grp['correlation'], color='#1976D2', alpha=0.8)
-            peak_lag = grp.loc[grp['correlation'].idxmax(), 'lag']
-            ax.axvline(peak_lag, color='#C62828', ls='--', lw=1, label=f'Peak at lag={peak_lag}')
+            # "Peak" = strongest absolute correlation. For regression the sign
+            # matters: negative peak = MSM drops when RMSE rises (makes sense
+            # for stability-based MSM); positive peak = opposite.
+            peak_idx = grp['correlation'].abs().idxmax()
+            peak_lag = grp.loc[peak_idx, 'lag']
+            peak_corr = grp.loc[peak_idx, 'correlation']
+            ax.axvline(peak_lag, color='#C62828', ls='--', lw=1,
+                       label=f'Peak at lag={peak_lag} (r={peak_corr:.3f})')
             ax.axvline(0, color='black', lw=0.5)
-            ax.set_xlabel('Lag (positive = MSM leads F1)')
+            ax.set_xlabel('Lag (positive = MSM leads RMSE)')
             ax.set_ylabel('Cross-correlation')
-            ax.set_title(f'MSM–F1 Lead-Lag (retrainer run) — {model}')
+            ax.set_title(f'MSM–RMSE Lead-Lag (retrainer run) — {model}')
             ax.legend(fontsize=8)
             ax.grid(alpha=0.2)
             plt.tight_layout()

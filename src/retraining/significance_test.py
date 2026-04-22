@@ -1,12 +1,19 @@
 '''
 significance_test.py — Pairwise Wilcoxon + Cohen's d + bootstrap CIs.
 
+Regression task: all tests operate on per-window RMSE.
+
+Sign conventions (important):
+    mean_diff   = mean(a_rmse) - mean(b_rmse)   → negative = a better
+    cohens_d    = mean(a - b) / std(a - b)      → negative = a better (lower RMSE)
+    effect_sizes() compares best-MSM vs best-baseline; negative d ⇒ MSM better.
+
 Run after analysis.py.
 
 Outputs:
     results/analysis/wilcoxon_results.csv
     results/analysis/effect_size.csv
-    results/analysis/f1_bootstrap_ci.csv  (includes overlaps_with_best_baseline)
+    results/analysis/rmse_bootstrap_ci.csv  (includes overlaps_with_best_baseline)
 '''
 
 import itertools
@@ -43,16 +50,17 @@ def pairwise_wilcoxon(df):
     records = []
 
     for model, model_df in df.groupby('model_type'):
+        # Best per exp_type = lowest mean RMSE.
         best_per_type = (
-            model_df.groupby(['exp_type', 'retrainer'])['f1']
+            model_df.groupby(['exp_type', 'retrainer'])['rmse']
             .mean().reset_index()
-            .sort_values('f1', ascending=False)
+            .sort_values('rmse', ascending=True)
             .drop_duplicates('exp_type')
         )
         best_names = best_per_type['retrainer'].tolist()
 
         pivot = model_df[model_df['retrainer'].isin(best_names)].pivot_table(
-            index='date_start', columns='retrainer', values='f1'
+            index='date_start', columns='retrainer', values='rmse'
         ).dropna()
 
         if pivot.shape[1] < 2:
@@ -77,8 +85,8 @@ def pairwise_wilcoxon(df):
                 'model_type': model,
                 'strategy_a': a_name, 'strategy_b': b_name,
                 'exp_type_a': exp_a,  'exp_type_b': exp_b,
-                'mean_f1_a':  round(a.mean(), 4), 'mean_f1_b': round(b.mean(), 4),
-                'mean_diff':  round((a - b).mean(), 4),
+                'mean_rmse_a': round(a.mean(), 4), 'mean_rmse_b': round(b.mean(), 4),
+                'mean_diff':   round((a - b).mean(), 4),   # negative ⇒ a better
                 'wilcoxon_stat': round(stat, 4) if not np.isnan(stat) else np.nan,
                 'p_value': round(p, 6),
                 'cohens_d': round(d, 4),
@@ -107,22 +115,23 @@ def pairwise_wilcoxon(df):
 
 
 def effect_sizes(df):
+    '''MSM vs best baseline, per model. Compares RMSE. Negative d ⇒ MSM better.'''
     records = []
     for model, model_df in df.groupby('model_type'):
         msm_sub = model_df[model_df['exp_type'].isin(MSM_TYPES)]
         if msm_sub.empty:
             continue
-        best_msm = msm_sub.groupby('retrainer')['f1'].mean().idxmax()
+        best_msm = msm_sub.groupby('retrainer')['rmse'].mean().idxmin()
 
         for btype in BASELINE_TYPES:
             base_sub = model_df[model_df['exp_type'] == btype]
             if base_sub.empty:
                 continue
-            best_base = base_sub.groupby('retrainer')['f1'].mean().idxmax()
+            best_base = base_sub.groupby('retrainer')['rmse'].mean().idxmin()
 
             pivot = model_df[
                 model_df['retrainer'].isin([best_msm, best_base])
-            ].pivot_table(index='date_start', columns='retrainer', values='f1').dropna()
+            ].pivot_table(index='date_start', columns='retrainer', values='rmse').dropna()
 
             if pivot.shape[1] < 2 or best_msm not in pivot.columns or best_base not in pivot.columns:
                 continue
@@ -140,22 +149,22 @@ def effect_sizes(df):
                 'strategy_a': best_msm, 'strategy_b': best_base,
                 'exp_type_a': model_df[model_df['retrainer'] == best_msm]['exp_type'].iloc[0],
                 'exp_type_b': btype,
-                'mean_f1_a':  round(a.mean(), 4), 'mean_f1_b': round(b.mean(), 4),
-                'mean_diff':  round((a - b).mean(), 4),
-                'cohens_d':   round(d, 4), 'effect_label': effect_label(d),
+                'mean_rmse_a': round(a.mean(), 4), 'mean_rmse_b': round(b.mean(), 4),
+                'mean_diff':   round((a - b).mean(), 4),   # negative ⇒ MSM better
+                'cohens_d':    round(d, 4), 'effect_label': effect_label(d),
                 'significant': p < 0.05, 'p_value': round(p, 6),
-                'n_windows':  len(pivot),
+                'n_windows':   len(pivot),
             })
     return pd.DataFrame(records)
 
 
-def bootstrap_f1_ci(df, n_bootstrap=1000, seed=42):
+def bootstrap_rmse_ci(df, n_bootstrap=1000, seed=42):
     records = []
     rng = np.random.default_rng(seed)
 
     for model, model_df in df.groupby('model_type'):
         pivot = model_df.pivot_table(
-            index='date_start', columns='retrainer', values='f1'
+            index='date_start', columns='retrainer', values='rmse'
         ).dropna()
         if pivot.empty:
             continue
@@ -173,17 +182,17 @@ def bootstrap_f1_ci(df, n_bootstrap=1000, seed=42):
                 'model_type': model,
                 'retrainer':  retrainer,
                 'exp_type':   get_experiment_type(retrainer),
-                'mean_f1':    round(values.mean(), 4),
+                'mean_rmse':  round(values.mean(), 4),
                 'ci_lower':   round(np.percentile(boot_means, 2.5), 4),
                 'ci_upper':   round(np.percentile(boot_means, 97.5), 4),
                 'n_windows':  len(values),
             })
 
-        # Compute ci-overlap-with-best-baseline
+        # Best baseline = lowest mean RMSE among baseline exp_types.
         best_baseline_ci = None
         for r in model_records:
             if r['exp_type'] in BASELINE_TYPES:
-                if best_baseline_ci is None or r['mean_f1'] > best_baseline_ci['mean_f1']:
+                if best_baseline_ci is None or r['mean_rmse'] < best_baseline_ci['mean_rmse']:
                     best_baseline_ci = r
         if best_baseline_ci is not None:
             for r in model_records:
@@ -195,7 +204,7 @@ def bootstrap_f1_ci(df, n_bootstrap=1000, seed=42):
         records.extend(model_records)
 
     return pd.DataFrame(records).sort_values(
-        ['model_type', 'mean_f1'], ascending=[True, False]
+        ['model_type', 'mean_rmse'], ascending=[True, True]
     ).reset_index(drop=True)
 
 
@@ -203,13 +212,13 @@ def main():
     os.makedirs('results/analysis', exist_ok=True)
     df = load_results()
 
-    print('Pairwise Wilcoxon tests...')
+    print('Pairwise Wilcoxon tests (on per-window RMSE)...')
     w = pairwise_wilcoxon(df)
     w.to_csv('results/analysis/wilcoxon_results.csv', index=False)
     sig = w[w.get('significant', False) == True]
     print(f'  {len(w)} pairs, {len(sig)} significant after Holm-Bonferroni')
 
-    print('\nEffect sizes (MSM vs baselines)...')
+    print('\nEffect sizes (MSM vs baselines, on RMSE; negative d = MSM better)...')
     e = effect_sizes(df)
     e.to_csv('results/analysis/effect_size.csv', index=False)
     print(f'  {len(e)} comparisons saved')
@@ -217,9 +226,9 @@ def main():
         print(e[['model_type', 'strategy_a', 'strategy_b',
                  'mean_diff', 'cohens_d', 'effect_label']].to_string(index=False))
 
-    print('\nBootstrap F1 confidence intervals...')
-    ci = bootstrap_f1_ci(df)
-    ci.to_csv('results/analysis/f1_bootstrap_ci.csv', index=False)
+    print('\nBootstrap RMSE confidence intervals...')
+    ci = bootstrap_rmse_ci(df)
+    ci.to_csv('results/analysis/rmse_bootstrap_ci.csv', index=False)
     print(f'  {len(ci)} retrainer CIs computed')
 
 

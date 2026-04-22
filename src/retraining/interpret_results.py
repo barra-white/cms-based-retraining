@@ -1,21 +1,23 @@
 '''
 interpret_results.py — Structured narrative report from analysis CSVs.
 
+Regression task. Primary metric: RMSE (lower = better).
+
 Run AFTER analysis.py, significance_test.py, and lead_lag_analysis.py.
 
 Reads results/analysis/*.csv and produces results/analysis/narrative_report.txt.
 
 Sections:
-    1. Overall strategy ranking
-    2. Aggregate metrics (macro F1, weighted F1, MCC, Cohen's kappa)
-    3. Stress vs calm regime performance
+    1. Overall strategy ranking (by RMSE)
+    2. Pooled regression metrics (RMSE, MAE, R², Pearson r)
+    3. Stress vs calm regime performance (RMSE delta)
     4. Detection latency
     5. Retrain selectivity
-    6. Statistical significance
-    7. Hyperparameter sensitivity
+    6. Statistical significance (on RMSE; negative d = MSM better)
+    7. Hyperparameter sensitivity (RMSE range)
     8. Causal feature usage
     9. Lead-lag analysis (RQ1 evidence)
-    10. Bootstrap F1 confidence intervals
+    10. Bootstrap RMSE confidence intervals
 '''
 
 import os
@@ -64,10 +66,10 @@ def _tag(exp):
     return ''
 
 
-# ── 1. Overall ranking ──
+# ── 1. Overall ranking (by RMSE) ──
 
 def section_ranking(L):
-    L.append(_h('1. OVERALL STRATEGY RANKING'))
+    L.append(_h('1. OVERALL STRATEGY RANKING (lower RMSE = better)'))
     df = _load('overall_summary.csv')
     if df is None:
         L.append('  [MISSING] overall_summary.csv')
@@ -75,50 +77,55 @@ def section_ranking(L):
 
     for model, grp in df.groupby('model_type'):
         L.append(_sub(f'Model: {model}'))
-        grp = grp.sort_values('mean_f1', ascending=False).reset_index(drop=True)
+        grp = grp.sort_values('mean_rmse', ascending=True).reset_index(drop=True)
         top = grp.iloc[0]
-        L.append(_f('FINDING', f"Best: '{top['retrainer']}' (F1={top['mean_f1']:.4f} ±{top['std_f1']:.4f})"))
+        L.append(_f('FINDING',
+            f"Best (lowest RMSE): '{top['retrainer']}' "
+            f"(RMSE={top['mean_rmse']:.4f} ±{top['std_rmse']:.4f}, "
+            f"MAE={top['mean_mae']:.4f}, R²={top['mean_r2']:.4f})"))
 
         msm  = grp[grp['exp_type'].isin(MSM_TYPES)]
         base = grp[grp['exp_type'].isin(BASELINE_TYPES)]
         if not msm.empty and not base.empty:
             bm = msm.iloc[0]
             bb = base.iloc[0]
-            delta = bm['mean_f1'] - bb['mean_f1']
+            # MSM better if its RMSE is lower.
+            delta = bm['mean_rmse'] - bb['mean_rmse']
             L.append(_f('DETAIL',
-                f"Best MSM: '{bm['retrainer']}' F1={bm['mean_f1']:.4f} | "
-                f"Best baseline: '{bb['retrainer']}' F1={bb['mean_f1']:.4f} | "
-                f"Diff: {delta:+.4f}"))
-            if delta <= 0:
-                L.append(_f('CONCERN', 'MSM does not outperform best baseline on raw F1. '
-                            'Rely on stress-period, detection-latency, and lead-lag evidence.'))
+                f"Best MSM: '{bm['retrainer']}' RMSE={bm['mean_rmse']:.4f} | "
+                f"Best baseline: '{bb['retrainer']}' RMSE={bb['mean_rmse']:.4f} | "
+                f"Diff (MSM-baseline): {delta:+.4f}  (negative ⇒ MSM better)"))
+            if delta >= 0:
+                L.append(_f('CONCERN',
+                    'MSM does not outperform best baseline on raw RMSE. '
+                    'Rely on stress-period, detection-latency, and lead-lag evidence.'))
 
-        L.append('  F1 by type:')
-        for exp, f1 in grp.groupby('exp_type')['mean_f1'].mean().sort_values(ascending=False).items():
-            L.append(f'    {exp:<20} {f1:.4f}{_tag(exp)}')
+        L.append('  RMSE by type (ascending):')
+        for exp, rmse in grp.groupby('exp_type')['mean_rmse'].mean().sort_values(ascending=True).items():
+            L.append(f'    {exp:<20} {rmse:.4f}{_tag(exp)}')
 
 
-# ── 2. Aggregate metrics ──
+# ── 2. Pooled regression metrics ──
 
 def section_aggregate_metrics(L):
-    L.append(_h('2. AGGREGATE METRICS (robust to class imbalance)'))
+    L.append(_h('2. POOLED REGRESSION METRICS'))
     df = _load('aggregate_metrics.csv')
     if df is None:
         L.append('  [MISSING] aggregate_metrics.csv')
         return
 
     L.append('')
-    L.append('  MCC and Cohen\'s kappa correct for chance agreement and are not')
-    L.append('  biased by class imbalance. Use these when macro F1 differences')
-    L.append('  are small.')
+    L.append('  Metrics computed on flattened y_true / y_pred across all windows.')
+    L.append('  RMSE / MAE lower = better. R² and Pearson r higher = better.')
 
     for model, grp in df.groupby('model_type'):
         L.append(_sub(f'Model: {model}'))
-        grp = grp.sort_values('mcc', ascending=False)
+        grp = grp.sort_values('rmse', ascending=True)
         top = grp.iloc[0]
         L.append(_f('FINDING',
-            f"Best by MCC: '{top['retrainer']}' (MCC={top['mcc']:.4f}, "
-            f"kappa={top['cohens_kappa']:.4f}, weighted_f1={top['weighted_f1']:.4f})"))
+            f"Best by pooled RMSE: '{top['retrainer']}' "
+            f"(RMSE={top['rmse']:.4f}, MAE={top['mae']:.4f}, "
+            f"R²={top['r2']:.4f}, Pearson r={top['pearson_r']:.4f})"))
 
         msm  = grp[grp['exp_type'].isin(MSM_TYPES)]
         base = grp[grp['exp_type'].isin(BASELINE_TYPES)]
@@ -126,35 +133,36 @@ def section_aggregate_metrics(L):
             bm = msm.iloc[0]
             bb = base.iloc[0]
             L.append(_f('DETAIL',
-                f"Best MSM MCC={bm['mcc']:.4f} kappa={bm['cohens_kappa']:.4f} | "
-                f"Best baseline MCC={bb['mcc']:.4f} kappa={bb['cohens_kappa']:.4f} | "
-                f"MCC diff: {bm['mcc'] - bb['mcc']:+.4f}"))
+                f"Best MSM RMSE={bm['rmse']:.4f} R²={bm['r2']:.4f} | "
+                f"Best baseline RMSE={bb['rmse']:.4f} R²={bb['r2']:.4f} | "
+                f"RMSE diff: {bm['rmse'] - bb['rmse']:+.4f}  (negative ⇒ MSM better)"))
 
 
 # ── 3. Stress vs calm ──
 
 def section_stress(L):
-    L.append(_h('3. STRESS vs CALM'))
-    df = _load('stress_period_f1.csv')
-    if df is None or 'f1_stress_minus_calm' not in df.columns:
+    L.append(_h('3. STRESS vs CALM  (positive delta = worse in stress)'))
+    df = _load('stress_period_rmse.csv')
+    if df is None or 'rmse_stress_minus_calm' not in df.columns:
         L.append('  [MISSING]')
         return
 
     for model, grp in df.groupby('model_type'):
         L.append(_sub(f'Model: {model}'))
-        grp = grp.sort_values('f1_stress_minus_calm', ascending=False)
+        # Lowest delta = least degradation under stress.
+        grp = grp.sort_values('rmse_stress_minus_calm', ascending=True)
         msm  = grp[grp['exp_type'].isin(MSM_TYPES)]
         base = grp[grp['exp_type'].isin(BASELINE_TYPES)]
         if not msm.empty and not base.empty:
             bm = msm.iloc[0]
             bb = base.iloc[0]
             L.append(_f('FINDING',
-                f"Best MSM delta: {bm['f1_stress_minus_calm']:+.4f} ('{bm['retrainer']}') | "
-                f"Best baseline delta: {bb['f1_stress_minus_calm']:+.4f} ('{bb['retrainer']}')"))
-            if bm['f1_stress_minus_calm'] > bb['f1_stress_minus_calm']:
-                L.append(_f('FINDING', 'MSM degrades less during stress than best baseline.'))
+                f"Best MSM delta: {bm['rmse_stress_minus_calm']:+.4f} ('{bm['retrainer']}') | "
+                f"Best baseline delta: {bb['rmse_stress_minus_calm']:+.4f} ('{bb['retrainer']}')"))
+            if bm['rmse_stress_minus_calm'] < bb['rmse_stress_minus_calm']:
+                L.append(_f('FINDING', 'MSM degrades less during stress (smaller RMSE rise) than best baseline.'))
             else:
-                L.append(_f('CONCERN', 'MSM shows no clear stress advantage on F1.'))
+                L.append(_f('CONCERN', 'MSM shows no clear stress advantage on RMSE.'))
 
 
 # ── 4. Detection latency ──
@@ -206,7 +214,7 @@ def section_selectivity(L):
 # ── 6. Significance ──
 
 def section_significance(L):
-    L.append(_h('6. STATISTICAL SIGNIFICANCE'))
+    L.append(_h("6. STATISTICAL SIGNIFICANCE  (Cohen's d on RMSE; negative ⇒ a better)"))
 
     friedman = _load('friedman_test.csv')
     if friedman is not None:
@@ -226,10 +234,11 @@ def section_significance(L):
 
     effect = _load('effect_size.csv')
     if effect is not None:
-        L.append(_sub("Effect Sizes (Cohen's d)"))
+        L.append(_sub("Effect Sizes (Cohen's d; negative = MSM better)"))
         for model, grp in effect.groupby('model_type'):
             L.append(f'  {model}:')
-            for _, row in grp.sort_values('cohens_d', ascending=False).iterrows():
+            # Rank by most-negative d (= MSM most ahead) first.
+            for _, row in grp.sort_values('cohens_d', ascending=True).iterrows():
                 mk = '[SIG]' if row['significant'] else '[ns] '
                 L.append(f"    {mk} {row['strategy_a'][:25]} vs {row['strategy_b'][:25]}: "
                          f"d={row['cohens_d']:+.3f} ({row['effect_label']})")
@@ -247,12 +256,14 @@ def section_sensitivity(L):
     for model, grp in df.groupby('model_type'):
         L.append(_sub(f'Model: {model}'))
         for exp, sub in grp.groupby('exp_type'):
-            rng = sub['mean_f1'].max() - sub['mean_f1'].min()
-            L.append(f'  {exp}: F1 range={rng:.4f} across {len(sub)} configs')
-            if rng <= 0.02:
+            rng = sub['mean_rmse'].max() - sub['mean_rmse'].min()
+            L.append(f'  {exp}: RMSE range={rng:.4f} across {len(sub)} configs')
+            # 0.02 was the old F1 threshold; for log-RV RMSE (~0.5–1.5 range)
+            # we loosen it slightly.
+            if rng <= 0.05:
                 L.append(_f('FINDING', 'Robust plateau — results not sensitive to hyperparameters.'))
             else:
-                L.append(_f('CONCERN', 'Range > 0.02 — hyperparameters matter.'))
+                L.append(_f('CONCERN', 'Range > 0.05 — hyperparameters matter.'))
 
 
 # ── 8. Causal features ──
@@ -284,9 +295,9 @@ def section_lead_lag(L):
         return
 
     L.append('')
-    L.append('  Does MSM predictively lead regime-normalised returns?')
+    L.append('  Does MSM predictively lead regime-normalised returns and RMSE?')
     L.append('  (Granger causality on drift observer run, which uses a frozen')
-    L.append('   model so F1 degradation is unconfounded by retraining events.)')
+    L.append('   model so RMSE degradation is unconfounded by retraining events.)')
 
     # Primary test: graph MSM vs secondary target
     primary = df[(df['signal'] == 'graph_msm') & (df['vs'] == cfg.TARGET_SECONDARY)]
@@ -319,16 +330,15 @@ def section_lead_lag(L):
                 f'MSM Granger-causes {cfg.TARGET_SECONDARY} on only {sig_count}/{total} models. '
                 f'RQ1 weakly supported.'))
 
-    # Secondary: does MSM lead F1?
-    f1_test = df[(df['signal'] == 'graph_msm') & (df['vs'] == 'F1')]
-    if not f1_test.empty:
-        L.append(_sub('Secondary: does MSM lead F1 on frozen model?'))
-        for _, row in f1_test.iterrows():
+    # Secondary: does MSM lead RMSE?
+    rmse_test = df[(df['signal'] == 'graph_msm') & (df['vs'] == 'RMSE')]
+    if not rmse_test.empty:
+        L.append(_sub('Secondary: does MSM lead RMSE on frozen model?'))
+        for _, row in rmse_test.iterrows():
             sig = 'SIG' if row.get('granger_significant', False) else 'ns '
             L.append(f"  {row['model_type']:<10}  Granger p={row['granger_min_p']:.4f} [{sig}]  "
                      f"xc best lag={row['xc_best_lag']}")
 
-    # Additional: SPY-focused MSM
     spy_test = df[(df['signal'] == 'spy_msm') & (df['vs'] == cfg.TARGET_SECONDARY)]
     if not spy_test.empty:
         L.append(_sub(f'SPY-focused MSM → {cfg.TARGET_SECONDARY}'))
@@ -337,23 +347,23 @@ def section_lead_lag(L):
             L.append(f"  {row['model_type']:<10}  Granger p={row['granger_min_p']:.4f} [{sig}]")
 
 
-# ── 10. Bootstrap CIs ──
+# ── 10. Bootstrap RMSE CIs ──
 
 def section_bootstrap_ci(L):
-    L.append(_h('10. BOOTSTRAP F1 CONFIDENCE INTERVALS'))
-    df = _load('f1_bootstrap_ci.csv')
+    L.append(_h('10. BOOTSTRAP RMSE CONFIDENCE INTERVALS'))
+    df = _load('rmse_bootstrap_ci.csv')
     if df is None or df.empty:
         L.append('  [MISSING]')
         return
 
     L.append('')
-    L.append('  95% CI on mean F1 via 1000-sample bootstrap resampling.')
-    L.append('  If CIs for MSM and best baseline overlap, the F1 difference is')
-    L.append('  within sampling noise and should not be emphasised.')
+    L.append('  95% CI on mean RMSE via 1000-sample bootstrap resampling.')
+    L.append('  If CIs for MSM and best baseline overlap, the RMSE difference')
+    L.append('  is within sampling noise and should not be emphasised.')
 
     for model, grp in df.groupby('model_type'):
         L.append(_sub(f'Model: {model}'))
-        grp = grp.sort_values('mean_f1', ascending=False)
+        grp = grp.sort_values('mean_rmse', ascending=True)
 
         msm  = grp[grp['exp_type'].isin(MSM_TYPES)]
         base = grp[grp['exp_type'].isin(BASELINE_TYPES)]
@@ -361,23 +371,23 @@ def section_bootstrap_ci(L):
             bm = msm.iloc[0]
             bb = base.iloc[0]
             L.append(f"  Best MSM:      {bm['retrainer'][:30]:<30}  "
-                     f"{bm['mean_f1']:.4f} [{bm['ci_lower']:.4f}, {bm['ci_upper']:.4f}]")
+                     f"{bm['mean_rmse']:.4f} [{bm['ci_lower']:.4f}, {bm['ci_upper']:.4f}]")
             L.append(f"  Best baseline: {bb['retrainer'][:30]:<30}  "
-                     f"{bb['mean_f1']:.4f} [{bb['ci_lower']:.4f}, {bb['ci_upper']:.4f}]")
+                     f"{bb['mean_rmse']:.4f} [{bb['ci_lower']:.4f}, {bb['ci_upper']:.4f}]")
             overlap = (bm['ci_lower'] <= bb['ci_upper']) and (bb['ci_lower'] <= bm['ci_upper'])
             if overlap:
                 L.append(_f('CONCERN',
-                    'CIs overlap — F1 difference is within sampling noise. '
+                    'CIs overlap — RMSE difference is within sampling noise. '
                     'Rely on stress-period and lead-lag evidence.'))
             else:
                 L.append(_f('FINDING',
-                    'CIs do not overlap — F1 difference is genuine.'))
+                    'CIs do not overlap — RMSE difference is genuine.'))
 
 
 def main():
     lines = [
         '=' * W,
-        '  CMS-BASED RETRAINING — RESULTS REPORT',
+        '  CMS-BASED RETRAINING — RESULTS REPORT (regression task)',
         '  Generated by interpret_results.py',
         '=' * W, '',
     ]

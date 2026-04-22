@@ -1,19 +1,19 @@
 '''
-analysis.py — Post-experiment analysis pipeline.
+analysis.py — Post-experiment analysis pipeline (regression task).
 
 Run after experiment.py completes. Produces CSVs to results/analysis/.
+
+Primary metric: RMSE (lower = better). MAE and R² reported alongside.
 
 Usage:
     python src/retraining/analysis.py
 
 Key outputs (each answers a specific thesis claim):
-    overall_summary.csv     — RQ2: which strategy wins on F1
-    aggregate_metrics.csv   — RQ2: robust metrics (MCC, kappa)
-    per_class_f1.csv        — RQ2: direction-specific performance
-    per_class_f1_wide.csv   — RQ2: same, pivoted for easier reading
+    overall_summary.csv     — RQ2: which strategy wins on RMSE
+    aggregate_metrics.csv   — RQ2: pooled regression metrics (rmse, mae, r2, pearson)
     detection_latency.csv   — RQ2: response time to stress events
     false_positive_rate.csv — RQ3: selectivity
-    stress_period_f1.csv    — RQ2: stress vs calm robustness
+    stress_period_rmse.csv  — RQ2: stress vs calm robustness
     sensitivity_summary.csv — RQ3: hyperparameter robustness
     msm_summary.csv         — RQ3: MSM distribution sanity
     ... and others
@@ -27,8 +27,8 @@ import sys
 
 import numpy as np
 import pandas as pd
-from scipy.stats import friedmanchisquare
-from sklearn.metrics import f1_score as sk_f1, matthews_corrcoef, cohen_kappa_score
+from scipy.stats import friedmanchisquare, pearsonr
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as cfg
@@ -89,87 +89,69 @@ def overall_summary(df):
     out = (
         df.groupby(['model_type', 'retrainer', 'exp_type'])
         .agg(
-            mean_f1=('f1', 'mean'),
-            std_f1=('f1', 'std'),
-            median_f1=('f1', 'median'),
-            mean_dir_acc=('directional_acc', 'mean'),
+            mean_rmse=('rmse', 'mean'),
+            std_rmse=('rmse', 'std'),
+            median_rmse=('rmse', 'median'),
+            mean_mae=('mae', 'mean'),
+            mean_r2=('r2', 'mean'),
             retrains=('retrain_triggered', 'sum'),
             signals_fired=('signal_fired', 'sum'),
             cooldowns_hit=('cooldown_active', 'sum'),
-            windows=('f1', 'count'),
+            windows=('rmse', 'count'),
         )
         .round(4)
-        .sort_values(['model_type', 'mean_f1'], ascending=[True, False])
+        .sort_values(['model_type', 'mean_rmse'], ascending=[True, True])
         .reset_index()
     )
-    # Add rank within model
-    out['rank_within_model'] = out.groupby('model_type')['mean_f1'].rank(
-        ascending=False, method='min'
+    # Lower RMSE wins → ascending rank.
+    out['rank_within_model'] = out.groupby('model_type')['mean_rmse'].rank(
+        ascending=True, method='min'
     ).astype(int)
     return out
 
 
-# ── 2. PER-CLASS F1 + AGGREGATE METRICS ──
+# ── 2. AGGREGATE REGRESSION METRICS (pooled y_true/y_pred) ──
 
-def per_class_and_aggregate_metrics(df):
-    CLASS_NAMES = {0: 'down', 1: 'neutral', 2: 'up'}
-    per_class_records = []
-    aggregate_records = []
+def regression_metrics(df):
+    '''
+    Pool all per-window predictions per (model, retrainer) and compute regression
+    metrics on the flat arrays. Replaces the old per-class F1 / MCC / kappa
+    block. Produces rmse, mae, r2, pearson_r, pearson_p.
+    '''
+    records = []
 
     for (model, retrainer), grp in df.groupby(['model_type', 'retrainer']):
-        y_true = sum(grp['y_true'].tolist(), [])
-        y_pred = sum(grp['y_pred'].tolist(), [])
+        y_true = np.asarray(sum(grp['y_true'].tolist(), []), dtype=float)
+        y_pred = np.asarray(sum(grp['y_pred'].tolist(), []), dtype=float)
 
-        per_class_f1 = sk_f1(y_true, y_pred, average=None, zero_division=0)
-        for cls, score in enumerate(per_class_f1):
-            per_class_records.append({
-                'model_type': model, 'retrainer': retrainer,
-                'exp_type':   get_experiment_type(retrainer),
-                'class':      cls, 'class_name': CLASS_NAMES.get(cls, str(cls)),
-                'f1':         round(float(score), 4),
-            })
+        if len(y_true) < 2 or np.var(y_true) == 0:
+            rmse = mae = r2 = pearson_r = pearson_p = np.nan
+        else:
+            rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+            mae  = float(mean_absolute_error(y_true, y_pred))
+            r2   = float(r2_score(y_true, y_pred))
+            try:
+                pearson_r, pearson_p = pearsonr(y_true, y_pred)
+                pearson_r = float(pearson_r)
+                pearson_p = float(pearson_p)
+            except Exception:
+                pearson_r = pearson_p = np.nan
 
-        macro_f1    = sk_f1(y_true, y_pred, average='macro', zero_division=0)
-        weighted_f1 = sk_f1(y_true, y_pred, average='weighted', zero_division=0)
-        try:
-            mcc = matthews_corrcoef(y_true, y_pred)
-        except ValueError:
-            mcc = np.nan
-        try:
-            kappa = cohen_kappa_score(y_true, y_pred)
-        except ValueError:
-            kappa = np.nan
-
-        aggregate_records.append({
-            'model_type':   model, 'retrainer': retrainer,
+        records.append({
+            'model_type':   model,
+            'retrainer':    retrainer,
             'exp_type':     get_experiment_type(retrainer),
-            'macro_f1':     round(macro_f1, 4),
-            'weighted_f1':  round(weighted_f1, 4),
-            'mcc':          round(mcc, 4) if not np.isnan(mcc) else np.nan,
-            'cohens_kappa': round(kappa, 4) if not np.isnan(kappa) else np.nan,
+            'rmse':         round(rmse, 6) if not np.isnan(rmse) else np.nan,
+            'mae':          round(mae, 6) if not np.isnan(mae) else np.nan,
+            'r2':           round(r2, 6) if not np.isnan(r2) else np.nan,
+            'pearson_r':    round(pearson_r, 6) if not np.isnan(pearson_r) else np.nan,
+            'pearson_p':    round(pearson_p, 6) if not np.isnan(pearson_p) else np.nan,
+            'n_points':     len(y_true),
         })
 
-    per_class_df = pd.DataFrame(per_class_records)
-    aggregate_df = pd.DataFrame(aggregate_records).sort_values(
-        ['model_type', 'mcc'], ascending=[True, False]
+    return pd.DataFrame(records).sort_values(
+        ['model_type', 'rmse'], ascending=[True, True]
     ).reset_index(drop=True)
-    return per_class_df, aggregate_df
-
-
-def wide_per_class_f1(per_class_df):
-    '''Pivot per-class F1 to wide format: one row per (model, retrainer),
-    columns for each class. Easier for Chapter 4 tables.'''
-    wide = per_class_df.pivot_table(
-        index=['model_type', 'retrainer', 'exp_type'],
-        columns='class_name',
-        values='f1',
-    ).reset_index()
-    wide.columns.name = None
-    # Rename class columns
-    for c in ('down', 'neutral', 'up'):
-        if c in wide.columns:
-            wide = wide.rename(columns={c: f'f1_{c}'})
-    return wide
 
 
 # ── 3. DETECTION LATENCY ──
@@ -200,7 +182,6 @@ def detection_latency(df):
                     'latency_days': lat, 'latency_windows': round(lat / 21, 1),
                     'detected': True,
                 })
-    # Also annotate per-event fastest flag
     result = pd.DataFrame(records)
     if not result.empty and 'detected' in result.columns:
         for (model, event), grp in result[result['detected']].groupby(['model_type', 'event']):
@@ -224,7 +205,6 @@ def false_positive_rate(df):
         ])
     retrains['in_stress'] = retrains['date_start'].apply(in_stress_window)
 
-    # Baseline FPR: what fraction of all windows are in stress?
     all_dates = df['date_start'].drop_duplicates()
     n_stress  = all_dates.apply(in_stress_window).sum()
     baseline_fpr = 1 - (n_stress / len(all_dates)) if len(all_dates) > 0 else np.nan
@@ -250,14 +230,14 @@ def false_positive_rate(df):
 def best_configs(df, top_k=3):
     summary = (
         df.groupby(['model_type', 'exp_type', 'retrainer'])
-        .agg(mean_f1=('f1', 'mean'), std_f1=('f1', 'std'),
-             mean_dir_acc=('directional_acc', 'mean'),
-             retrains=('retrain_triggered', 'sum'), windows=('f1', 'count'))
+        .agg(mean_rmse=('rmse', 'mean'), std_rmse=('rmse', 'std'),
+             mean_mae=('mae', 'mean'), mean_r2=('r2', 'mean'),
+             retrains=('retrain_triggered', 'sum'), windows=('rmse', 'count'))
         .round(4).reset_index()
     )
     summary['rank'] = (
-        summary.groupby(['model_type', 'exp_type'])['mean_f1']
-        .rank(ascending=False, method='first').astype(int)
+        summary.groupby(['model_type', 'exp_type'])['mean_rmse']
+        .rank(ascending=True, method='first').astype(int)
     )
     return (
         summary[summary['rank'] <= top_k]
@@ -269,6 +249,8 @@ def best_configs(df, top_k=3):
 # ── 6. RETRAIN EFFICIENCY ──
 
 def retrain_efficiency(df, n_windows=3):
+    '''For each retrain event, compute RMSE change (pre_rmse - post_rmse).
+    Positive = RMSE dropped after retrain = improvement.'''
     records = []
     for (model, retrainer), grp in df.groupby(['model_type', 'retrainer']):
         grp = grp.sort_values('window').reset_index(drop=True)
@@ -276,21 +258,21 @@ def retrain_efficiency(df, n_windows=3):
         retrain_idxs = grp.index[grp['retrain_triggered']].tolist()
         gains = []
         for idx in retrain_idxs:
-            pre  = grp.iloc[max(0, idx - n_windows):idx]['f1'].mean()
-            post = grp.iloc[idx + 1: idx + 1 + n_windows]['f1'].mean()
+            pre  = grp.iloc[max(0, idx - n_windows):idx]['rmse'].mean()
+            post = grp.iloc[idx + 1: idx + 1 + n_windows]['rmse'].mean()
             if not (np.isnan(pre) or np.isnan(post)):
-                gains.append(post - pre)
+                gains.append(pre - post)   # positive => RMSE dropped
         n_pos = sum(1 for g in gains if g > 0)
         records.append({
             'model_type': model, 'retrainer': retrainer, 'exp_type': exp,
             'n_retrains': len(retrain_idxs),
-            'mean_f1_gain':      round(np.mean(gains), 4) if gains else np.nan,
+            'mean_rmse_gain':    round(np.mean(gains), 4) if gains else np.nan,
             'positive_retrains': n_pos,
             'negative_retrains': len(gains) - n_pos,
             'pct_positive':      round(n_pos / len(gains), 3) if gains else np.nan,
         })
     return pd.DataFrame(records).sort_values(
-        ['model_type', 'mean_f1_gain'], ascending=[True, False]
+        ['model_type', 'mean_rmse_gain'], ascending=[True, False]
     ).reset_index(drop=True)
 
 
@@ -313,37 +295,41 @@ def cooldown_analysis(df):
     return pd.DataFrame(records)
 
 
-# ── 8. STRESS PERIOD F1 ──
+# ── 8. STRESS vs CALM (RMSE) ──
 
-def stress_period_f1(df):
+def stress_period_rmse(df):
+    '''
+    NOTE: positive rmse_stress_minus_calm now means the retrainer is WORSE in
+    stress (higher error). Flipped semantics vs classification; interpretation
+    reversed wherever this column is consumed.
+    '''
     data = df.copy()
     data['regime'] = data['date_start'].apply(
         lambda d: 'stress' if in_stress_window(d) else 'calm'
     )
     agg = (
         data.groupby(['model_type', 'retrainer', 'exp_type', 'regime'])
-        .agg(mean_f1=('f1', 'mean'), std_f1=('f1', 'std'), n=('f1', 'count'))
+        .agg(mean_rmse=('rmse', 'mean'), std_rmse=('rmse', 'std'), n=('rmse', 'count'))
         .round(4).reset_index()
     )
     pivot = agg.pivot_table(
         index=['model_type', 'retrainer', 'exp_type'],
-        columns='regime', values=['mean_f1', 'std_f1', 'n'],
+        columns='regime', values=['mean_rmse', 'std_rmse', 'n'],
     )
     pivot.columns = ['_'.join(c).strip() for c in pivot.columns]
-    if 'mean_f1_stress' in pivot.columns and 'mean_f1_calm' in pivot.columns:
-        pivot['f1_stress_minus_calm'] = (
-            pivot['mean_f1_stress'] - pivot['mean_f1_calm']
+    if 'mean_rmse_stress' in pivot.columns and 'mean_rmse_calm' in pivot.columns:
+        pivot['rmse_stress_minus_calm'] = (
+            pivot['mean_rmse_stress'] - pivot['mean_rmse_calm']
         ).round(4)
-        # Heuristic: if |delta| < 0.5 * max(std_stress, std_calm), within noise
-        if 'std_f1_stress' in pivot.columns:
+        if 'std_rmse_stress' in pivot.columns:
             noise = np.maximum(
-                pivot.get('std_f1_stress', 0).fillna(0),
-                pivot.get('std_f1_calm', 0).fillna(0),
+                pivot.get('std_rmse_stress', 0).fillna(0),
+                pivot.get('std_rmse_calm', 0).fillna(0),
             )
-            pivot['likely_within_noise'] = (pivot['f1_stress_minus_calm'].abs() < 0.5 * noise)
+            pivot['likely_within_noise'] = (pivot['rmse_stress_minus_calm'].abs() < 0.5 * noise)
     return (
         pivot.reset_index()
-        .sort_values(['model_type', 'f1_stress_minus_calm'], ascending=[True, False])
+        .sort_values(['model_type', 'rmse_stress_minus_calm'], ascending=[True, True])
     )
 
 
@@ -369,20 +355,19 @@ def sensitivity_summary(df):
 
     out = (
         sub.groupby(['model_type', 'exp_type', 'tau_1', 'tau_2', 'lookback'])
-        .agg(mean_f1=('f1', 'mean'), std_f1=('f1', 'std'),
-             mean_dir_acc=('directional_acc', 'mean'),
+        .agg(mean_rmse=('rmse', 'mean'), std_rmse=('rmse', 'std'),
+             mean_mae=('mae', 'mean'),
              retrains=('retrain_triggered', 'sum'))
         .round(4)
-        .sort_values(['model_type', 'exp_type', 'mean_f1'], ascending=[True, True, False])
+        .sort_values(['model_type', 'exp_type', 'mean_rmse'], ascending=[True, True, True])
         .reset_index()
     )
 
-    # Add normalised sensitivity score per (model, exp_type): range / mean
     def _add_sensitivity(grp):
-        f1_range = grp['mean_f1'].max() - grp['mean_f1'].min()
-        f1_mean  = grp['mean_f1'].mean()
-        grp['f1_range_within_group'] = round(f1_range, 4)
-        grp['f1_range_pct_of_mean']  = round(f1_range / f1_mean, 4) if f1_mean > 0 else np.nan
+        rmse_range = grp['mean_rmse'].max() - grp['mean_rmse'].min()
+        rmse_mean  = grp['mean_rmse'].mean()
+        grp['rmse_range_within_group'] = round(rmse_range, 4)
+        grp['rmse_range_pct_of_mean']  = round(rmse_range / rmse_mean, 4) if rmse_mean > 0 else np.nan
         return grp
     out = out.groupby(['model_type', 'exp_type'], group_keys=False).apply(_add_sensitivity)
     return out
@@ -422,14 +407,14 @@ def causal_feature_usage(df):
     ).reset_index(drop=True)
 
 
-# ── 11. FRIEDMAN RANKS ──
+# ── 11. FRIEDMAN RANKS (on RMSE) ──
 
 def friedman_ranks(df):
     rank_records = []
     test_records = []
 
     for model, grp in df.groupby('model_type'):
-        pivot = grp.pivot_table(index='date_start', columns='retrainer', values='f1')
+        pivot = grp.pivot_table(index='date_start', columns='retrainer', values='rmse')
         n_before = len(pivot)
         pivot = pivot.dropna()
         if n_before != len(pivot):
@@ -438,7 +423,8 @@ def friedman_ranks(df):
         if pivot.empty or pivot.shape[1] < 2:
             continue
 
-        ranked = pivot.rank(axis=1, ascending=False, method='average')
+        # Lower RMSE = better → rank ascending.
+        ranked = pivot.rank(axis=1, ascending=True, method='average')
         for retrainer, mean_rank in ranked.mean().sort_values().items():
             rank_records.append({
                 'model_type': model, 'retrainer': retrainer,
@@ -513,18 +499,19 @@ def stress_window_robustness(df):
 
         pivot = (
             data.groupby(['model_type', 'retrainer', 'exp_type', 'regime'])
-            .agg(mean_f1=('f1', 'mean')).reset_index()
+            .agg(mean_rmse=('rmse', 'mean')).reset_index()
             .pivot_table(index=['model_type', 'retrainer', 'exp_type'],
-                         columns='regime', values='mean_f1').reset_index()
+                         columns='regime', values='mean_rmse').reset_index()
         )
         pivot.columns.name = None
         if 'stress' in pivot.columns and 'calm' in pivot.columns:
-            pivot['f1_stress_minus_calm'] = (pivot['stress'] - pivot['calm']).round(4)
+            pivot['rmse_stress_minus_calm'] = (pivot['stress'] - pivot['calm']).round(4)
         pivot['stress_window_days'] = window_days
         records.append(pivot)
 
     full = pd.concat(records, ignore_index=True)
 
+    # MSM beats static when its stress-minus-calm is LOWER (less degradation).
     summary_rows = []
     for (model, exp), grp in full.groupby(['model_type', 'exp_type']):
         if exp not in MSM_TYPES:
@@ -537,15 +524,15 @@ def stress_window_robustness(df):
             ]
             if msm_row.empty or static_rows.empty:
                 continue
-            if 'f1_stress_minus_calm' not in msm_row.columns or 'f1_stress_minus_calm' not in static_rows.columns:
+            if 'rmse_stress_minus_calm' not in msm_row.columns or 'rmse_stress_minus_calm' not in static_rows.columns:
                 continue
             summary_rows.append({
                 'model_type': model, 'exp_type': exp,
                 'stress_window_days': wd,
-                'msm_delta':    round(msm_row['f1_stress_minus_calm'].max(), 4),
-                'static_delta': round(static_rows['f1_stress_minus_calm'].max(), 4),
+                'msm_delta':    round(msm_row['rmse_stress_minus_calm'].min(), 4),
+                'static_delta': round(static_rows['rmse_stress_minus_calm'].min(), 4),
                 'msm_beats_static': bool(
-                    msm_row['f1_stress_minus_calm'].max() > static_rows['f1_stress_minus_calm'].max()
+                    msm_row['rmse_stress_minus_calm'].min() < static_rows['rmse_stress_minus_calm'].min()
                 ),
             })
 
@@ -580,41 +567,6 @@ def msm_summary(df):
         ['model_type', 'msm_mean'], ascending=[True, True]
     ).reset_index(drop=True)
 
-def balanced_window_f1(df):
-    '''
-    Compute F1 only on test windows where all 3 classes are represented.
-    Windows where the test set lacks a class make macro-F1 degenerate
-    (max achievable is 2/3). With volatility regime persistence, many
-    windows contain only 1-2 classes, dragging average F1 down
-    independent of predictive skill.
-    '''
-    records = []
-    for (model, retrainer), grp in df.groupby(['model_type', 'retrainer']):
-        balanced_windows = []
-        all_windows = []
-        for _, row in grp.iterrows():
-            y_true = row['y_true']
-            if not y_true:
-                continue
-            classes = set(y_true)
-            all_windows.append(row['f1'])
-            if len(classes) == 3:
-                balanced_windows.append(row['f1'])
-        records.append({
-            'model_type': model,
-            'retrainer': retrainer,
-            'exp_type': get_experiment_type(retrainer),
-            'n_all_windows': len(all_windows),
-            'n_balanced_windows': len(balanced_windows),
-            'balanced_fraction': round(
-                len(balanced_windows) / max(len(all_windows), 1), 3
-            ),
-            'mean_f1_all': round(np.mean(all_windows), 4) if all_windows else np.nan,
-            'mean_f1_balanced': round(np.mean(balanced_windows), 4) if balanced_windows else np.nan,
-        })
-    return pd.DataFrame(records).sort_values(
-        ['model_type', 'mean_f1_balanced'], ascending=[True, False]
-    ).reset_index(drop=True)
 
 # ── MAIN ──
 
@@ -631,18 +583,13 @@ def main():
         print(f'  saved {name} ({len(data)} rows)')
 
     _save(overall_summary(df), 'overall_summary.csv')
-
-    per_class, aggregate = per_class_and_aggregate_metrics(df)
-    _save(per_class, 'per_class_f1.csv')
-    _save(wide_per_class_f1(per_class), 'per_class_f1_wide.csv')
-    _save(aggregate, 'aggregate_metrics.csv')
-    _save(balanced_window_f1(df), 'balanced_window_f1.csv')
-    _save(detection_latency(df),   'detection_latency.csv')
-    _save(false_positive_rate(df), 'false_positive_rate.csv')
-    _save(best_configs(df),        'best_configs.csv')
-    _save(retrain_efficiency(df),  'retrain_efficiency.csv')
-    _save(cooldown_analysis(df),   'cooldown_analysis.csv')
-    _save(stress_period_f1(df),    'stress_period_f1.csv')
+    _save(regression_metrics(df),   'aggregate_metrics.csv')
+    _save(detection_latency(df),    'detection_latency.csv')
+    _save(false_positive_rate(df),  'false_positive_rate.csv')
+    _save(best_configs(df),         'best_configs.csv')
+    _save(retrain_efficiency(df),   'retrain_efficiency.csv')
+    _save(cooldown_analysis(df),    'cooldown_analysis.csv')
+    _save(stress_period_rmse(df),   'stress_period_rmse.csv')
 
     sens = sensitivity_summary(df)
     if not sens.empty:

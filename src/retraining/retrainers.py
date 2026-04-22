@@ -5,11 +5,11 @@ import random
 import numpy as np
 import pandas as pd
 
-from xgboost import XGBClassifier
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
+from xgboost import XGBRegressor
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import Ridge
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
-from sklearn.metrics import f1_score, accuracy_score
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from river.drift import ADWIN
 from abc import ABC, abstractmethod
 
@@ -19,13 +19,12 @@ import config as cfg
 np.random.seed(42)
 random.seed(42)
 
-# ---- Model configurations (unchanged from original) ----
+# ---- Model configurations (regression) ----
 MODEL_CONFIGS = {
     'xgboost': {
-        'class': XGBClassifier,
+        'class': XGBRegressor,
         'fixed_params': {
-            'objective':    'multi:softmax',
-            'num_class':    3,
+            'objective':    'reg:squarederror',
             'random_state': 42,
             'verbosity':    0,
         },
@@ -51,7 +50,7 @@ MODEL_CONFIGS = {
         },
     },
     'rf': {
-        'class': RandomForestClassifier,
+        'class': RandomForestRegressor,
         'fixed_params': {'random_state': 42, 'n_jobs': -1},
         'grid': {
             'n_estimators':     [100, 200, 300, 500],
@@ -59,7 +58,6 @@ MODEL_CONFIGS = {
             'min_samples_split':[2, 5, 10, 20],
             'min_samples_leaf': [1, 2, 4, 8],
             'max_features':     ['sqrt', 'log2'],
-            'class_weight':     [None, 'balanced'],
         },
         'warm_grid_fn': lambda bp: {
             'n_estimators':      sorted({max(50, bp['n_estimators'] + d) for d in [-100, 0, 100]}),
@@ -67,23 +65,20 @@ MODEL_CONFIGS = {
             'min_samples_split': [bp.get('min_samples_split', 2)],
             'min_samples_leaf':  [bp.get('min_samples_leaf', 1)],
             'max_features':      [bp.get('max_features', 'sqrt')],
-            'class_weight':      [bp.get('class_weight', None)],
         },
     },
     'lr': {
-        'class': LogisticRegression,
-        'fixed_params': {'random_state': 42, 'max_iter': 1000},
+        # Ridge replaces the previous LogisticRegression slot. alpha = 1/C under
+        # L2 — a trimmed grid is plenty for a linear baseline on ~11 features.
+        'class': Ridge,
+        'fixed_params': {'random_state': 42, 'max_iter': 5000},
         'grid': {
-            'C':            [0.0001, 0.001, 0.01, 0.1, 1.0, 10.0, 100.0],
-            'solver':       ['saga'],
-            'penalty':      ['l2', None],
-            'class_weight': [None, 'balanced'],
+            'alpha':  [0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0],
+            'solver': ['auto'],
         },
         'warm_grid_fn': lambda bp: {
-            'C':            sorted({bp['C'] * f for f in [0.1, 1.0, 10.0]}),
-            'solver':       [bp.get('solver', 'saga')],
-            'penalty':      [bp.get('penalty', 'l2')],
-            'class_weight': [bp.get('class_weight', None)],
+            'alpha':  sorted({bp['alpha'] * f for f in [0.1, 1.0, 10.0]}),
+            'solver': [bp.get('solver', 'auto')],
         },
     },
 }
@@ -103,97 +98,25 @@ def _to_json(obj) -> str:
 
 
 # ============================================================================
-#   BASE RETRAINER
+#   BASE RETRAINER  (REGRESSION)
 # ============================================================================
 
 class BaseRetrainer(ABC):
-    def __init__(self, df, feature_cols, target, model_type='xgboost', n_bins=3, window=504, step=21, cooldown=3, horizon=None):
+    def __init__(self, df, feature_cols, target, model_type='xgboost',
+                 window=504, step=21, cooldown=3, horizon=None):
         if model_type not in MODEL_CONFIGS:
             raise ValueError(f"Unsupported model_type '{model_type}'")
         self.df           = df
         self.feature_cols = feature_cols
         self.target       = target
-        self.n_bins       = n_bins
         self.window       = window
         self.step         = step
         self.model_type   = model_type
         self.best_params  = None
         self.cooldown     = cooldown
         self.last_retrain_window = -999
-        self.bin_edges    = None
         self.results      = []
         self.horizon      = horizon if horizon is not None else getattr(cfg, 'FORECAST_HORIZON', 5)
-
-    # ---- Binning: dispatches on config.BINNING_SCHEME ----
-
-    def freeze_bin_edges(self, train_vals):
-        '''
-        Set bin edges based on config.BINNING_SCHEME.
-
-        'fixed_stdev'    : thresholds at ±FIXED_THRESHOLD. Ignores train_vals.
-        'global_tertile' : tertiles frozen from FIRST training window; locked thereafter.
-        'equal_frequency': per-window quantile (legacy).
-        '''
-        if cfg.BINNING_SCHEME == 'integer_labels':
-            # Target values are already integer labels (0/1/2).
-            # Edges at 0.5 and 1.5 so digitize returns exactly the same labels.
-            self.bin_edges = np.array([-np.inf, 0.5, 1.5, np.inf])
-            # Diagnostic once per retrainer on first call
-            if not hasattr(self, '_bin_logged'):
-                vals = train_vals[~np.isnan(train_vals)]
-                counts = np.bincount(vals.astype(int), minlength=3)
-                fracs = counts / counts.sum() if counts.sum() else np.zeros(3)
-                print(f"  [freeze_bin_edges] integer_labels scheme; train class dist: "
-                    f"{counts.tolist()} (fracs={fracs.round(3).tolist()})")
-                self._bin_logged = True
-            return
-        
-        
-        if cfg.BINNING_SCHEME == 'fixed_stdev':
-            thr = cfg.FIXED_THRESHOLD
-            self.bin_edges = np.array([-np.inf, -thr, thr, np.inf])
-            return
-
-        if cfg.BINNING_SCHEME == 'global_tertile':
-            # Freeze once on first call; subsequent calls are no-ops.
-            if self.bin_edges is not None:
-                return
-            vals = train_vals[~np.isnan(train_vals)]
-            if len(vals) == 0:
-                raise ValueError("freeze_bin_edges: no valid target values in initial window")
-            q1, q2 = np.quantile(vals, [1/3, 2/3])
-            self.bin_edges = np.array([-np.inf, q1, q2, np.inf])
-
-            counts = np.bincount(np.digitize(vals, self.bin_edges[1:-1]), minlength=3)
-            fracs  = counts / counts.sum()
-            print(f"  [freeze_bin_edges] edges frozen: q1={q1:.4f}, q2={q2:.4f}")
-            print(f"  [freeze_bin_edges] train class dist: {counts.tolist()} "
-                f"(fracs={fracs.round(3).tolist()})")
-            if fracs.max() > 0.5:
-                print(f"  [freeze_bin_edges] WARNING: training class imbalance "
-                    f"(max class frac={fracs.max():.3f}).")
-            return
-
-        # Legacy equal_frequency fallback
-        vals = train_vals[~np.isnan(train_vals)]
-        if len(vals) == 0:
-            raise ValueError("freeze_bin_edges: no valid target values")
-        n = len(vals)
-        sorted_vals = np.sort(vals)
-        boundary_idxs = [int(n * k / self.n_bins) for k in range(1, self.n_bins)]
-        interior_edges = sorted(set(
-            (sorted_vals[i - 1] + sorted_vals[i]) / 2.0 for i in boundary_idxs
-        ))
-        if len(interior_edges) < self.n_bins - 1:
-            unique_vals = np.unique(sorted_vals)
-            quantiles = np.linspace(0, 1, self.n_bins + 1)[1:-1]
-            interior_edges = sorted(set(np.quantile(unique_vals, quantiles).tolist()))
-        self.bin_edges = np.array([-np.inf] + interior_edges + [np.inf])
-
-    def apply_bins(self, vals):
-        if self.bin_edges is None:
-            raise RuntimeError("Bin edges not frozen yet.")
-        return np.digitize(vals, self.bin_edges[1:-1])
 
     # ---- Model ----
 
@@ -211,7 +134,6 @@ class BaseRetrainer(ABC):
         corrupts the training signal when it fires on bugs.'''
         X_df = pd.DataFrame(X).ffill()
         if X_df.isna().any().any():
-            # If ffill can't fill (leading NaNs), use column mean from non-NaN values
             col_means = X_df.mean(axis=0)
             if col_means.isna().any():
                 bad = col_means[col_means.isna()].index.tolist()
@@ -223,12 +145,11 @@ class BaseRetrainer(ABC):
         '''Forward-fill target NaN. Raise if target is entirely NaN.'''
         y_ser = pd.Series(y).ffill()
         if y_ser.isna().any():
-            # Leading NaNs — fill with training-window mean
             mean_val = y_ser.mean()
             if pd.isna(mean_val):
                 raise ValueError("_impute_target: target entirely NaN in this window")
             y_ser = y_ser.fillna(mean_val)
-        return y_ser.values
+        return y_ser.astype(float).values
 
     def _full_grid(self):
         return MODEL_CONFIGS[self.model_type]['grid']
@@ -243,24 +164,24 @@ class BaseRetrainer(ABC):
         param_grid = self._warm_grid() if (warm and self.best_params is not None) else self._full_grid()
         searcher = GridSearchCV(
             estimator=base_model, param_grid=param_grid, cv=tscv,
-            scoring='f1_macro', n_jobs=-1, refit=True, verbose=0,
+            scoring='neg_root_mean_squared_error', n_jobs=-1, refit=True, verbose=0,
             error_score=np.nan,
         )
         searcher.fit(X_train, y_train)
         self.best_params = searcher.best_params_
         return searcher.best_estimator_
 
-    def directional_accuracy(self, y_true, y_pred):
-        mask = (y_true != 1)
-        if np.sum(mask) == 0:
-            return np.nan
-        return accuracy_score(y_true[mask], y_pred[mask])
-
     def evaluate(self, model, X_test, y_test):
-        pred = model.predict(X_test)
-        f1 = f1_score(y_test, pred, average='macro', zero_division=0)
-        directional_acc = self.directional_accuracy(y_test, pred)
-        return f1, directional_acc, pred, y_test
+        pred = model.predict(X_test).astype(float)
+        y_test = np.asarray(y_test, dtype=float)
+        rmse = float(np.sqrt(mean_squared_error(y_test, pred)))
+        mae  = float(mean_absolute_error(y_test, pred))
+        # r2 is undefined for zero-variance windows — return NaN then.
+        if np.var(y_test) > 0:
+            r2 = float(r2_score(y_test, pred))
+        else:
+            r2 = np.nan
+        return rmse, mae, r2, pred, y_test
 
     def in_cooldown(self, w):
         return (w - self.last_retrain_window) < self.cooldown
@@ -291,7 +212,6 @@ class BaseRetrainer(ABC):
         self.results = []
         self.last_retrain_window = -999
         self.best_params = None
-        self.bin_edges = None
         self._reset_run_state()
         model = None
         model_feature_cols = self.feature_cols
@@ -303,22 +223,21 @@ class BaseRetrainer(ABC):
             test_end    = test_start + self.step
             if test_end > len(self.df):
                 continue
-            # Note: train_end is the last index of the training window, test_start is the first index of the test window
+            # train_end is the last index of the training window; test_start is the first index of the test window.
+            # Shift target training cutoff back by the forecast horizon so the last training rows do not peek at the test window.
             H = self.horizon
             train_target_end = train_end - H
-            if train_target_end <= train_start+50:
+            if train_target_end <= train_start + 50:
                 continue
             candidate_cols = self._get_feature_cols_for_window(g)
             context   = self._compute_window_context(w, g, all_graphs)
-            y_r_train = self._impute_target(self.df[self.target].iloc[train_start:train_target_end].values)
+            y_train   = self._impute_target(self.df[self.target].iloc[train_start:train_target_end].values)
             y_r_test  = self._impute_target(self.df[self.target].iloc[test_start:test_end].values)
 
             triggered, signal_fired, cooldown_active = False, False, False
 
             if w == 0 or model is None:
                 X_train = self._impute(self.df[candidate_cols].iloc[train_start:train_target_end].values)
-                self.freeze_bin_edges(y_r_train)
-                y_train = self.apply_bins(y_r_train)
                 model = self.run_grid_search(X_train, y_train, warm=False)
                 self.last_retrain_window = w
                 model_feature_cols = candidate_cols
@@ -327,8 +246,6 @@ class BaseRetrainer(ABC):
                 cooldown_active = self.in_cooldown(w)
                 if signal_fired and not cooldown_active:
                     X_train = self._impute(self.df[candidate_cols].iloc[train_start:train_target_end].values)
-                    self.freeze_bin_edges(y_r_train)
-                    y_train = self.apply_bins(y_r_train)
                     model = self.run_grid_search(X_train, y_train, warm=True)
                     self.last_retrain_window = w
                     triggered = True
@@ -336,8 +253,8 @@ class BaseRetrainer(ABC):
                     self._post_retrain_hook()
 
             X_test = self._impute(self.df[model_feature_cols].iloc[test_start:test_end].values)
-            y_test = self.apply_bins(y_r_test)
-            f1, directional_acc, pred, y_true = self.evaluate(model, X_test, y_test)
+            y_test = y_r_test
+            rmse, mae, r2, pred, y_true = self.evaluate(model, X_test, y_test)
 
             result = {
                 'window':                w + 1,
@@ -348,8 +265,9 @@ class BaseRetrainer(ABC):
                 'signal_fired':          signal_fired,
                 'cooldown_active':       cooldown_active,
                 'windows_since_retrain': w - self.last_retrain_window,
-                'f1':                    round(f1, 4),
-                'directional_acc':       round(directional_acc, 4),
+                'rmse':                  round(rmse, 6),
+                'mae':                   round(mae, 6),
+                'r2':                    round(r2, 6) if not np.isnan(r2) else np.nan,
                 'y_true':                _to_json(y_true.tolist()),
                 'y_pred':                _to_json(pred.tolist()),
                 'best_params':           _to_json(self.best_params),
@@ -383,6 +301,11 @@ class FixedScheduleRetrainer(BaseRetrainer):
 
 
 class PerformanceRetrainer(BaseRetrainer):
+    '''
+    Fire when the recent rolling RMSE rises above a trailing baseline by
+    drop_threshold. The original classifier version tracked an F1 *drop*;
+    for regression, higher RMSE = worse, so we track an RMSE *rise*.
+    '''
     def __init__(self, *args, drop_threshold=0.1, lookback_n=5, **kwargs):
         super().__init__(*args, **kwargs)
         self.drop_threshold = drop_threshold
@@ -393,11 +316,11 @@ class PerformanceRetrainer(BaseRetrainer):
         required = self.lookback_n + smooth_n
         if len(self.results) < required:
             return False
-        baseline_f1 = [r['f1'] for r in self.results[-(self.lookback_n + smooth_n):-smooth_n]]
-        baseline    = np.mean(baseline_f1)
-        recent_f1   = [r['f1'] for r in self.results[-smooth_n:]]
-        current     = np.mean(recent_f1)
-        return (baseline - current) > self.drop_threshold
+        baseline_rmse = [r['rmse'] for r in self.results[-(self.lookback_n + smooth_n):-smooth_n]]
+        baseline      = np.mean(baseline_rmse)
+        recent_rmse   = [r['rmse'] for r in self.results[-smooth_n:]]
+        current       = np.mean(recent_rmse)
+        return (current - baseline) > self.drop_threshold
 
 
 
@@ -418,8 +341,9 @@ class RandomRetrainer(BaseRetrainer):
 
 class ADWINRetrainer(BaseRetrainer):
     '''
-    FIX: previously reset ADWIN on every drift detection, even if cooldown
-    suppressed the retrain. Now resets only after the retrain actually fires.
+    Feeds per-sample |true - pred| into ADWIN (continuous stream). Drift is
+    detected when the error distribution shifts. Resets only after the retrain
+    actually fires, so cooldown suppression doesn't lose state.
     '''
     def __init__(self, *args, delta=0.002, **kwargs):
         super().__init__(*args, **kwargs)
@@ -440,7 +364,7 @@ class ADWINRetrainer(BaseRetrainer):
         y_true = json.loads(last['y_true'])
         y_pred = json.loads(last['y_pred'])
         for true, pred in zip(y_true, y_pred):
-            self.adwin.update(int(true == pred))
+            self.adwin.update(float(abs(true - pred)))
             if self.adwin.drift_detected:
                 self._pending_retrain = True
                 return True
@@ -472,7 +396,6 @@ class MSMRetrainer(BaseRetrainer):
         for g in recent_windows:
             all_edges |= g['edges']
         if not all_edges:
-            # FIX: empty edge set = structural collapse, not stability.
             return 0.0, {}
         edge_scores = {
             e: sum(1 for g in recent_windows if e in g['edges']) / n
@@ -488,7 +411,6 @@ class MSMRetrainer(BaseRetrainer):
         for g in recent_windows:
             all_edges |= g['edges']
         if not all_edges:
-            # FIX: empty edge set = structural collapse, not stability.
             return 0.0, {}
         edge_scores = {
             e: sum(1 for g in recent_windows if e in g['edges']) / n
@@ -565,7 +487,6 @@ class SPYFocusedMSMRetrainer(MSMRetrainer):
         for g in recent_windows:
             all_edges |= {e for e in g['edges'] if e[1] == self.target_idx}
         if not all_edges:
-            # FIX: no incoming edges to target = causal breakdown, not stability.
             return 0.0, {}
         edge_scores = {
             e: sum(1 for g in recent_windows if e in g['edges']) / n
@@ -648,13 +569,10 @@ class CausalFeatureRetrainer(MSMRetrainer):
 
 class DriftSignalObserverRetrainer(StaticRetrainer):
     '''
-    Frozen model, frozen bins. Never retrains. Logs graph-level MSM and
-    SPY-focused MSM at every window.
-
-    Purpose: feeds lead_lag_analysis.py t (does MSM
-    predictively lead F1 degradation?). Because the model never retrains,
-    F1 degradation is uncorrupted by retraining events, giving a clean
-    time series for cross-correlation and Granger analysis.
+    Frozen model. Never retrains. Logs graph-level MSM and SPY-focused MSM at
+    every window. Output feeds lead_lag_analysis.py: does MSM predictively
+    lead forecast-error (RMSE) rises? Because the model never retrains,
+    error degradation is uncorrupted by retraining events.
     '''
     def __init__(self, *args, lookback=4, **kwargs):
         super().__init__(*args, **kwargs)
@@ -667,7 +585,6 @@ class DriftSignalObserverRetrainer(StaticRetrainer):
         if w < self.lookback:
             return {'graph_msm': np.nan, 'spy_msm': np.nan}
 
-        # Graph-level MSM: mean persistence of all edges over lookback.
         start = max(0, w - self.lookback + 1)
         recent = all_graphs[start:w + 1]
         all_edges = set()
@@ -679,7 +596,6 @@ class DriftSignalObserverRetrainer(StaticRetrainer):
             scores = [sum(1 for gg in recent if e in gg['edges']) / len(recent) for e in all_edges]
             graph_msm = float(np.mean(scores))
 
-        # SPY-focused MSM: edges into SPY only (graph index 0).
         spy_edges = set()
         for gg in recent:
             spy_edges |= {e for e in gg['edges'] if e[1] == 0}

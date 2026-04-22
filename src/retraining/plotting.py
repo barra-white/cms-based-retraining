@@ -1,17 +1,17 @@
 '''
-plotting.py — Thesis figures from analysis CSVs.
+plotting.py — Thesis figures from analysis CSVs (regression task).
 
 Outputs to results/plots/:
-    fig_01  Mean F1 by strategy (top per exp_type)
-    fig_02  F1 stress advantage
+    fig_01  Mean RMSE by strategy (top per exp_type)
+    fig_02  RMSE stress-minus-calm delta
     fig_03  Detection latency
     fig_04  Retrain precision vs volume
     fig_05  MSM sensitivity heatmap
     fig_09  Wilcoxon p-value heatmap
     fig_10  Effect size dot plot
     fig_11  Causal feature usage
-    fig_14  Aggregate metrics (MCC, kappa)
-    fig_15  Drift signal overlay
+    fig_14  Aggregate regression metrics (RMSE, R²)
+    fig_15  Drift signal overlay (MSM + RMSE + target)
 '''
 
 import os
@@ -78,41 +78,28 @@ EXP_LABELS = {
 
 
 def _display_label(retrainer_name, show_params=False):
-    '''
-    Produce a compact, readable label for any retrainer name.
-    
-    MSM variants:  'MSM-0.83/0.75' or 'MSM' (if show_params=False)
-    Fixed:         'Fixed-3m' or 'Fixed'
-    Perf:          'Perf-5%' or 'Perf'
-    ADWIN:         'ADWIN-0.005' or 'ADWIN'
-    Static/random: 'Static', 'Random'
-    '''
     exp = get_experiment_type(retrainer_name)
     base = EXP_LABELS.get(exp, exp)
 
     if not show_params:
         return base
 
-    # Extract key params for MSM variants
     if exp in MSM_TYPES and exp != 'causal':
         t1 = re.search(r'tau_1_([\d.]+)', retrainer_name)
         t2 = re.search(r'tau_2_([\d.]+)', retrainer_name)
         if t1 and t2:
             return f'{base}-{t1.group(1)}/{t2.group(1)}'
 
-    # Fixed interval
     if exp == 'fixed':
         iv = re.search(r'fixed_(\d+)', retrainer_name)
         if iv:
             return f'{base}-{iv.group(1)}m'
 
-    # Perf threshold
     if exp == 'perf':
         dt = re.search(r'drop_([\d.]+)', retrainer_name)
         if dt:
-            return f'{base}-{float(dt.group(1))*100:.0f}%'
+            return f'{base}-{dt.group(1)}'
 
-    # ADWIN delta
     if exp == 'adwin':
         dl = re.search(r'delta_([\d.]+)', retrainer_name)
         if dl:
@@ -157,27 +144,27 @@ def _legend_patches(exp_types):
 
 
 def plot_01():
-    '''Best strategy per exp_type, with CI whiskers and significance markers.'''
+    '''Best strategy per exp_type by RMSE (lower = better), with bootstrap CIs.'''
     df = _load('overall_summary.csv')
     if df is None: return
 
-    ci_df = _load('f1_bootstrap_ci.csv')
+    ci_df = _load('rmse_bootstrap_ci.csv')
 
     for model in df['model_type'].unique():
         sub = df[df['model_type'] == model]
-        top = (sub.sort_values('mean_f1', ascending=False)
+        # Best per exp_type = lowest RMSE. Display ascending (best at top).
+        top = (sub.sort_values('mean_rmse', ascending=True)
                .drop_duplicates('exp_type')
-               .sort_values('mean_f1', ascending=True))
+               .sort_values('mean_rmse', ascending=False))
         if top.empty: continue
 
-        # Build CI data for whiskers
         if ci_df is not None:
             ci_model = ci_df[ci_df['model_type'] == model]
             ci_map = {r['retrainer']: (r['ci_lower'], r['ci_upper'])
                       for _, r in ci_model.iterrows()}
-            errs_lo = [top.iloc[i]['mean_f1'] - ci_map.get(top.iloc[i]['retrainer'], (top.iloc[i]['mean_f1'], top.iloc[i]['mean_f1']))[0]
+            errs_lo = [top.iloc[i]['mean_rmse'] - ci_map.get(top.iloc[i]['retrainer'], (top.iloc[i]['mean_rmse'], top.iloc[i]['mean_rmse']))[0]
                        for i in range(len(top))]
-            errs_hi = [ci_map.get(top.iloc[i]['retrainer'], (top.iloc[i]['mean_f1'], top.iloc[i]['mean_f1']))[1] - top.iloc[i]['mean_f1']
+            errs_hi = [ci_map.get(top.iloc[i]['retrainer'], (top.iloc[i]['mean_rmse'], top.iloc[i]['mean_rmse']))[1] - top.iloc[i]['mean_rmse']
                        for i in range(len(top))]
             errs = [errs_lo, errs_hi]
         else:
@@ -187,36 +174,36 @@ def plot_01():
         labels = [_display_label(n, show_params=True) for n in top['retrainer']]
         colours = [_col(e) for e in top['exp_type']]
 
-        bars = ax.barh(labels, top['mean_f1'], xerr=errs,
-                       color=colours, capsize=3, alpha=0.9, error_kw={'elinewidth': 0.8})
+        ax.barh(labels, top['mean_rmse'], xerr=errs,
+                color=colours, capsize=3, alpha=0.9, error_kw={'elinewidth': 0.8})
 
-        ax.set_xlabel('Mean Macro-F1 (error bars = 95% bootstrap CI)')
+        ax.set_xlabel('Mean RMSE (error bars = 95% bootstrap CI) — lower is better')
         ax.set_title(f'Best Strategy per Type — {model}')
-        median_f1 = top['mean_f1'].median()
-        ax.axvline(median_f1, color='black', ls=':', lw=0.7, label='Median')
+        median_rmse = top['mean_rmse'].median()
+        ax.axvline(median_rmse, color='black', ls=':', lw=0.7, label='Median')
 
-        # Mark top bar's value
-        top_bar = top.iloc[-1]
-        ax.annotate(f"{top_bar['mean_f1']:.3f}",
-                    xy=(top_bar['mean_f1'], len(top) - 1),
+        best_bar = top.iloc[-1]   # last row is the best since sorted descending
+        ax.annotate(f"{best_bar['mean_rmse']:.3f}",
+                    xy=(best_bar['mean_rmse'], len(top) - 1),
                     xytext=(5, 0), textcoords='offset points',
                     fontsize=8, va='center', fontweight='bold')
 
         ax.legend(handles=_legend_patches(top['exp_type'].unique()), loc='lower right', fontsize=7)
         plt.tight_layout()
-        _save(fig, f'fig_01_f1_ranking_{model}.png')
+        _save(fig, f'fig_01_rmse_ranking_{model}.png')
 
 
 def plot_02():
-    '''Stress-calm delta bars, colored by sign, with within-noise greying.'''
-    df = _load('stress_period_f1.csv')
-    if df is None or 'f1_stress_minus_calm' not in df.columns: return
+    '''Stress-minus-calm RMSE delta. Positive delta = WORSE in stress (red).'''
+    df = _load('stress_period_rmse.csv')
+    if df is None or 'rmse_stress_minus_calm' not in df.columns: return
 
     for model in df['model_type'].unique():
         sub = df[df['model_type'] == model]
-        top = (sub.sort_values('f1_stress_minus_calm', ascending=False)
+        # Best = lowest delta (least stress degradation). Sort with best at top.
+        top = (sub.sort_values('rmse_stress_minus_calm', ascending=True)
                .drop_duplicates('exp_type')
-               .sort_values('f1_stress_minus_calm', ascending=True))
+               .sort_values('rmse_stress_minus_calm', ascending=False))
         if top.empty: continue
 
         fig, ax = plt.subplots(figsize=(7, max(3, len(top) * 0.45)))
@@ -224,21 +211,21 @@ def plot_02():
         colours = []
         for _, row in top.iterrows():
             if row.get('likely_within_noise', False):
-                colours.append('#BDBDBD')  # grey for within-noise
-            elif row['f1_stress_minus_calm'] >= 0:
-                colours.append('#1976D2')
+                colours.append('#BDBDBD')
+            elif row['rmse_stress_minus_calm'] > 0:
+                colours.append('#C62828')  # worse in stress
             else:
-                colours.append('#C62828')
+                colours.append('#1976D2')  # better in stress
 
-        ax.barh(labels, top['f1_stress_minus_calm'], color=colours, alpha=0.9)
+        ax.barh(labels, top['rmse_stress_minus_calm'], color=colours, alpha=0.9)
         ax.axvline(0, color='black', lw=0.8)
-        ax.set_xlabel('F1 (stress) − F1 (calm)')
-        ax.set_title(f'Stress Period F1 Advantage — {model}')
+        ax.set_xlabel('RMSE (stress) − RMSE (calm)  [positive = worse in stress]')
+        ax.set_title(f'Stress-Period RMSE Delta — {model}')
 
-        pos_p = mpatches.Patch(color='#1976D2', label='Positive')
-        neg_p = mpatches.Patch(color='#C62828', label='Negative')
+        worse_p = mpatches.Patch(color='#C62828', label='Worse in stress')
+        better_p = mpatches.Patch(color='#1976D2', label='Better in stress')
         noise_p = mpatches.Patch(color='#BDBDBD', label='Within noise')
-        ax.legend(handles=[pos_p, neg_p, noise_p], fontsize=7, loc='lower right')
+        ax.legend(handles=[worse_p, better_p, noise_p], fontsize=7, loc='lower right')
         plt.tight_layout()
         _save(fig, f'fig_02_stress_delta_{model}.png')
 
@@ -270,7 +257,6 @@ def plot_03():
                                 fontsize=7, xytext=(5, 4), textcoords='offset points',
                                 fontweight='bold')
 
-        # Note missed events
         n_missed = len(missed)
         if n_missed > 0:
             ax.text(0.98, 0.02, f'{n_missed} (retrainer, event) pairs missed',
@@ -300,7 +286,6 @@ def plot_04():
         ax.set_ylabel('Precision (TP / total)')
         ax.set_ylim(-0.05, 1.05)
 
-        # Random baseline
         if 'baseline_random_fpr' in sub.columns and not sub.empty:
             baseline_precision = 1 - sub.iloc[0]['baseline_random_fpr']
             ax.axhline(baseline_precision, color='black', ls='--', lw=0.8,
@@ -317,16 +302,18 @@ def plot_04():
 
 
 def plot_05():
+    '''tau_1 vs tau_2 heatmap. Lower RMSE = better; colour map inverted.'''
     df = _load('sensitivity_summary.csv')
     if df is None: return
     for model in df['model_type'].unique():
         for exp in df[df['model_type'] == model]['exp_type'].unique():
             sub = df[(df['model_type'] == model) & (df['exp_type'] == exp)]
-            pivot = sub.pivot_table(index='tau_1', columns='tau_2', values='mean_f1', aggfunc='mean')
+            pivot = sub.pivot_table(index='tau_1', columns='tau_2', values='mean_rmse', aggfunc='mean')
             if pivot.empty: continue
 
             fig, ax = plt.subplots(figsize=(5, 4))
-            im = ax.imshow(pivot.values, cmap='YlGn', aspect='auto',
+            # Reverse colour map so LOW RMSE (good) is green.
+            im = ax.imshow(pivot.values, cmap='YlGn_r', aspect='auto',
                            vmin=pivot.values.min(), vmax=pivot.values.max())
             ax.set_xticks(range(len(pivot.columns)))
             ax.set_xticklabels([f'{v:.2f}' for v in pivot.columns])
@@ -339,7 +326,7 @@ def plot_05():
                     v = pivot.values[i, j]
                     if not np.isnan(v):
                         ax.text(j, i, f'{v:.3f}', ha='center', va='center', fontsize=8)
-            plt.colorbar(im, ax=ax, label='Mean F1')
+            plt.colorbar(im, ax=ax, label='Mean RMSE (lower = better)')
             ax.set_title(f'Sensitivity: $\\tau_1$ vs $\\tau_2$ — {model}/{EXP_LABELS.get(exp, exp)}')
             plt.tight_layout()
             _save(fig, f'fig_05_sensitivity_{model}_{exp}.png')
@@ -382,6 +369,8 @@ def plot_09():
 
 
 def plot_10():
+    '''Effect sizes. For regression, negative Cohen's d on RMSE = MSM better
+    (lower RMSE). See significance_test.py for the subtraction order.'''
     df = _load('effect_size.csv')
     if df is None or df.empty: return
     for model in df['model_type'].unique():
@@ -397,7 +386,7 @@ def plot_10():
         for t, ls in [(0.2, ':'), (0.5, '--'), (0.8, '-.')]:
             ax.axvline(t, color='grey', ls=ls, lw=0.6)
             ax.axvline(-t, color='grey', ls=ls, lw=0.6)
-        ax.set_xlabel("Cohen's d (positive = MSM better)")
+        ax.set_xlabel("Cohen's d on RMSE  (negative = MSM better)")
         ax.set_title(f'Effect Sizes — {model}')
         sig_p = mpatches.Patch(color='#1976D2', label='p < 0.05')
         ns_p  = mpatches.Patch(color='#BDBDBD', label='Not significant')
@@ -425,33 +414,47 @@ def plot_11():
 
 
 def plot_14_aggregate_metrics():
+    '''Plot RMSE and R² side-by-side for best per exp_type.'''
     df = _load('aggregate_metrics.csv')
     if df is None: return
 
     for model in df['model_type'].unique():
         sub = df[df['model_type'] == model]
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-        for ax, metric, title in [(axes[0], 'mcc', 'MCC'),
-                                   (axes[1], 'cohens_kappa', "Cohen's kappa")]:
-            # Best per exp_type only
-            top = (sub.sort_values(metric, ascending=False)
-                   .drop_duplicates('exp_type')
-                   .sort_values(metric, ascending=True))
-            labels = [_display_label(n, show_params=True) for n in top['retrainer']]
-            colors = [_col(e) for e in top['exp_type']]
-            ax.barh(labels, top[metric], color=colors, alpha=0.9)
-            ax.axvline(0, color='black', lw=0.8)
-            ax.set_xlabel(title)
-            ax.set_title(f'Best per Type by {title} — {model}')
-            ax.legend(handles=_legend_patches(top['exp_type'].unique()),
-                      loc='lower right', fontsize=7)
-            ax.grid(alpha=0.2, axis='x')
+
+        # RMSE panel: lower = better → sort ascending, best at top.
+        rmse_top = (sub.sort_values('rmse', ascending=True)
+                    .drop_duplicates('exp_type')
+                    .sort_values('rmse', ascending=False))
+        labels = [_display_label(n, show_params=True) for n in rmse_top['retrainer']]
+        colors = [_col(e) for e in rmse_top['exp_type']]
+        axes[0].barh(labels, rmse_top['rmse'], color=colors, alpha=0.9)
+        axes[0].set_xlabel('Pooled RMSE (lower = better)')
+        axes[0].set_title(f'Best per Type by RMSE — {model}')
+        axes[0].grid(alpha=0.2, axis='x')
+        axes[0].legend(handles=_legend_patches(rmse_top['exp_type'].unique()),
+                       loc='lower right', fontsize=7)
+
+        # R² panel: higher = better.
+        r2_top = (sub.sort_values('r2', ascending=False)
+                  .drop_duplicates('exp_type')
+                  .sort_values('r2', ascending=True))
+        labels = [_display_label(n, show_params=True) for n in r2_top['retrainer']]
+        colors = [_col(e) for e in r2_top['exp_type']]
+        axes[1].barh(labels, r2_top['r2'], color=colors, alpha=0.9)
+        axes[1].axvline(0, color='black', lw=0.8)
+        axes[1].set_xlabel('Pooled R² (higher = better)')
+        axes[1].set_title(f'Best per Type by R² — {model}')
+        axes[1].grid(alpha=0.2, axis='x')
+        axes[1].legend(handles=_legend_patches(r2_top['exp_type'].unique()),
+                       loc='lower right', fontsize=7)
+
         plt.tight_layout()
         _save(fig, f'fig_14_aggregate_{model}.png')
 
 
 def plot_15_drift_overlay():
-    '''MSM + F1 + target (if available) time series with stress shading.'''
+    '''MSM + RMSE + secondary target time series with stress shading.'''
     raw_path = 'results/experiments/all_results.csv'
     if not os.path.exists(raw_path):
         print('  [SKIP] plot_15: all_results.csv not found')
@@ -460,7 +463,6 @@ def plot_15_drift_overlay():
     df = pd.read_csv(raw_path, parse_dates=['date_start', 'date_end'])
     df['exp_type'] = df['retrainer'].apply(get_experiment_type)
 
-    # Load target once
     target_available = False
     try:
         full_df = pd.read_csv('data/processed/standardized_data.csv', parse_dates=['Date'])
@@ -476,7 +478,6 @@ def plot_15_drift_overlay():
             print(f'  [SKIP] plot_15 {model}: no observer data')
             continue
 
-        # Align target to observer windows
         target = None
         if target_available and full_df is not None:
             target = []
@@ -504,18 +505,18 @@ def plot_15_drift_overlay():
         ax_msm.set_ylabel('MSM')
         ax_msm.set_ylim(0, 1.05)
         ax_msm.legend(loc='lower left', fontsize=8)
-        ax_msm.set_title(f'MSM, F1, and {cfg.TARGET_SECONDARY} Over Time — {model}\n'
-                          f'(observer run — frozen model)')
+        ax_msm.set_title(f'MSM, RMSE, and {cfg.TARGET_SECONDARY} Over Time — {model}\n'
+                         f'(observer run — frozen model)')
         ax_msm.grid(alpha=0.2)
 
-        ax_f1 = axes[1]
-        f1_rolling = obs.set_index('date_end')['f1'].rolling(3, min_periods=1).mean()
-        ax_f1.plot(f1_rolling.index, f1_rolling.values, color='#C62828', lw=1.3,
-                   label='F1 (3-window rolling)')
-        _shade(ax_f1)
-        ax_f1.set_ylabel('F1')
-        ax_f1.legend(loc='lower left', fontsize=8)
-        ax_f1.grid(alpha=0.2)
+        ax_rmse = axes[1]
+        rmse_rolling = obs.set_index('date_end')['rmse'].rolling(3, min_periods=1).mean()
+        ax_rmse.plot(rmse_rolling.index, rmse_rolling.values, color='#C62828', lw=1.3,
+                     label='RMSE (3-window rolling)')
+        _shade(ax_rmse)
+        ax_rmse.set_ylabel('RMSE')
+        ax_rmse.legend(loc='lower left', fontsize=8)
+        ax_rmse.grid(alpha=0.2)
 
         if target is not None:
             ax_tgt = axes[2]
@@ -527,7 +528,7 @@ def plot_15_drift_overlay():
             ax_tgt.legend(loc='lower left', fontsize=8)
             ax_tgt.grid(alpha=0.2)
         else:
-            ax_f1.set_xlabel('Window end date')
+            ax_rmse.set_xlabel('Window end date')
 
         plt.tight_layout()
         _save(fig, f'fig_15_drift_overlay_{model}.png')

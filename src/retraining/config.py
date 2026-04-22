@@ -8,8 +8,6 @@ STRESS_EVENTS = {
 }
 STRESS_WINDOW_DAYS = 60
 
-BALANCED_WINDOW_MIN_CLASSIFICATION_FRACTION = 0.1  # minimum fraction of each class in a window
-
 # Experiment type classification
 EXP_TYPE_PREFIXES = [
     'spy_msm', 'timeout_msm', 'msm', 'causal',
@@ -22,16 +20,16 @@ MSM_TYPES      = {'msm', 'spy_msm', 'timeout_msm', 'causal'}
 BASELINE_TYPES = {'static', 'random', 'fixed', 'perf', 'adwin'}
 SIGNAL_DRIVEN  = {'msm', 'spy_msm', 'timeout_msm', 'causal', 'adwin', 'perf'}
 
-# Binning configuration — decision from diagnostic_v2
-# Fixed thresholds at ±0.3 standardised units give balanced classes
-# and regime-sensitive semantics without hiding distributional shifts.
-BINNING_SCHEME   = 'integer_labels'
-FIXED_THRESHOLD  = 0.3  # in standardised units (standard deviations)
+# Primary forecasting target (REGRESSION)
+# 5-day forward log realised variance. Continuous float. The standard
+# volatility-forecasting target.
+TARGET_PRIMARY = 'SPY_logrv_5d'
 
-# Primary forecasting target
-TARGET_PRIMARY = 'SPY_vol_direction_5d'  # 5-day forward-looking log realized volatility, the main target for RQ1 and RQ2
-TARGET_SECONDARY = 'SPY_lr_local_std'  # local volatility regime indicator, the main target for RQ1 lead-lag analysis
-TARGET_VOL_LEVEL = 'SPY_logrv_5d'  # the raw log-RV target, used for analysis and sanity checks but not for classification (too unbalanced)
+# Secondary target for lead-lag analysis (regime-normalised returns).
+TARGET_SECONDARY = 'SPY_lr_local_std'
+
+# Retained for diagnostic scripts that still want the raw level.
+TARGET_VOL_LEVEL = 'SPY_logrv_5d'
 
 FORECAST_HORIZON = 5
 

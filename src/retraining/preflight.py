@@ -1,15 +1,15 @@
 '''
-preflight.py — Fast sanity checks before running the 16h experiment sweep.
+preflight.py — Fast sanity checks before running the experiment sweep.
 
 Run this FIRST before experiment.py. If any check fails, exits non-zero.
 
-Checks:
+Checks (regression task):
     1. Config target exists in standardized_data.csv
     2. Features do not include any target column (leakage guard)
-    3. Target column is not standardized (targets should be raw log-RV)
+    3. Target column is continuous float, finite, non-degenerate
     4. Features ARE standardized (roughly mean 0, std 1)
     5. Causal graphs file exists, shape matches graph_var_names expectation
-    6. Initial training window produces balanced tertile bins
+    6. Initial training window has adequate target variance
     7. No leading-NaN contamination in dropped df
     8. Feature shift is correct (shifted features come from t-1)
 
@@ -41,7 +41,7 @@ def check(name, condition, message=''):
 
 def main():
     print('=' * 72)
-    print('  PREFLIGHT CHECKS')
+    print('  PREFLIGHT CHECKS (regression task)')
     print('=' * 72)
 
     # ----- 1. Data file exists and target present -----
@@ -58,13 +58,13 @@ def main():
 
     # ----- 2. Feature exclusion -----
     print('\n2. Feature exclusion (no target leakage)')
-    FEATURE_EXCLUSIONS = [ 
+    FEATURE_EXCLUSIONS = [
         'Date',
-        'SPY_lr_local_std',  # secondary target for lead-lag analysis
-        'SPY_logrv_5d',  # alternative secondary target with same horizon as primary, more noise
-        'SPY_logrv_20d',  # alternative secondary target with longer horizon,
-        'SPY_vol_change_5d',  # alternative secondary target capturing direction of volatility change
-        'SPY_vol_direction_5d',  # primary target for classification, also excluded from features
+        'SPY_lr_local_std',
+        'SPY_logrv_5d',            # primary regression target
+        'SPY_logrv_20d',
+        'SPY_vol_change_5d',
+        'SPY_vol_direction_5d',    # legacy classification label still in CSV
     ]
     feature_cols = [c for c in df.columns if c not in FEATURE_EXCLUSIONS]
     check(f'TARGET_PRIMARY excluded from features',
@@ -75,23 +75,25 @@ def main():
     check('Exactly 11 feature columns', len(feature_cols) == 11,
           f'got {len(feature_cols)}')
 
-    # ----- 3. Target is integer labels 0/1/2 -----
-    print('\n3. Target is integer labels (0/1/2)')
+    # ----- 3. Target is continuous float, finite, non-degenerate -----
+    print('\n3. Target is continuous volatility (float)')
     t = df[cfg.TARGET_PRIMARY].dropna()
-    unique_vals = sorted(t.unique())
-    check('Target is integer-valued',
-        all(float(v).is_integer() for v in unique_vals),
-        f'unique values = {unique_vals}')
-    check('Target has exactly 3 classes {0, 1, 2}',
-        set(int(v) for v in unique_vals) == {0, 1, 2},
-        f'unique values = {unique_vals}')
-    counts = t.astype(int).value_counts().sort_index()
-    fracs = counts / counts.sum()
-    print(f'     Full-series class distribution: '
-        f'down={fracs.get(0, 0):.3f}, flat={fracs.get(1, 0):.3f}, up={fracs.get(2, 0):.3f}')
-    check('No class below 10% of total',
-        fracs.min() >= 0.10,
-        f'min class frac = {fracs.min():.3f}')
+    check('Target is numeric',
+          pd.api.types.is_numeric_dtype(t),
+          f'dtype = {t.dtype}')
+    check('Target has no infinite values',
+          np.isfinite(t.values).all(),
+          f'n_inf = {int((~np.isfinite(t.values)).sum())}')
+    # Log-RV of 5-day forward variance on SPY lies roughly in [-12, -5];
+    # a very wide guard so we don't have to retune if the sample changes.
+    check('Target in plausible log-RV range (-15 < x < 0)',
+          t.min() > -15 and t.max() < 0,
+          f'range = [{t.min():.3f}, {t.max():.3f}]')
+    check('Target has meaningful variance (std > 0.05)',
+          t.std() > 0.05,
+          f'std = {t.std():.6f}')
+    print(f'     Target distribution: mean={t.mean():+.4f}, std={t.std():.4f}, '
+          f'min={t.min():+.4f}, max={t.max():+.4f}, n={len(t)}')
 
     # ----- 4. Features ARE standardized (mean ~0, std ~1) -----
     print('\n4. Features are causally rolling-standardized')
@@ -115,17 +117,16 @@ def main():
         check('At least 80 graph windows', len(graphs) >= 80,
               f'got {len(graphs)} windows')
 
-    # ----- 6. Initial training window class balance -----
-    print('\n6. Initial training window class balance')
+    # ----- 6. Initial training window target stats -----
+    print('\n6. Initial training window target stats')
     df_clean = df.dropna(subset=feature_cols + [cfg.TARGET_PRIMARY]).reset_index(drop=True)
-    initial_target = df_clean[cfg.TARGET_PRIMARY].iloc[:504].astype(int).values
-    counts = np.bincount(initial_target, minlength=3)
-    fracs = counts / counts.sum()
-    print(f'     Initial-window distribution: '
-        f'down={fracs[0]:.3f}, flat={fracs[1]:.3f}, up={fracs[2]:.3f}')
-    check('No class below 10% in initial window',
-        fracs.min() >= 0.10,
-        f'min class frac = {fracs.min():.3f}')
+    initial_target = df_clean[cfg.TARGET_PRIMARY].iloc[:504].astype(float).values
+    print(f'     Initial-window target: mean={initial_target.mean():+.4f}, '
+          f'std={initial_target.std():.4f}, '
+          f'min={initial_target.min():+.4f}, max={initial_target.max():+.4f}')
+    check('Initial-window target std > 0.01',
+          initial_target.std() > 0.01,
+          f'std = {initial_target.std():.6f}')
 
     # ----- 7. Dataset size after dropna -----
     print('\n7. Dataset size post-dropna')
@@ -140,7 +141,6 @@ def main():
     print('\n8. Feature shift correctness')
     df_shifted = df_clean.copy()
     df_shifted[feature_cols] = df_shifted[feature_cols].shift(1)
-    # After shift, row 0 is NaN on features
     check('Row 0 of shifted features is NaN',
           df_shifted[feature_cols].iloc[0].isna().all())
     check('Row 1 of shifted features equals row 0 of unshifted',
