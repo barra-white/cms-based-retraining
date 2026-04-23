@@ -54,7 +54,7 @@ MSM_DEFAULT_CLASS  = SPYFocusedMSMRetrainer
 MSM_DEFAULT_KWARGS = {"tau_1": 0.83, "tau_2": 0.75, "lookback": 4}
 
 
-MODEL_TYPES = ['xgboost', 'lr', 'rf']
+MODEL_TYPES = ['lr', 'rf', 'xgboost']
 
 
 # ----- CONFIG BUILDERS -----
