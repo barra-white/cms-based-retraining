@@ -43,6 +43,7 @@ get_experiment_type  = cfg.get_experiment_type
 in_stress_window     = cfg.in_stress_window
 
 ROBUSTNESS_WINDOW_DAYS = [45, 60, 90, 120]
+DETECTION_CAP_DAYS = 90
 
 
 # ── LOADING ──
@@ -155,7 +156,6 @@ def regression_metrics(df):
 
 
 # ── 3. DETECTION LATENCY ──
-
 def detection_latency(df):
     records = []
     sig_df   = df[df['exp_type'].isin(SIGNAL_DRIVEN)].copy()
@@ -164,13 +164,15 @@ def detection_latency(df):
     for (model, retrainer), grp in retrains.groupby(['model_type', 'retrainer']):
         exp = get_experiment_type(retrainer)
         for event_name, event_date in STRESS_EVENTS.items():
-            after = grp[grp['date_end'] >= event_date]
+            cap_date = event_date + pd.Timedelta(days=DETECTION_CAP_DAYS)
+            after = grp[(grp['date_end'] >= event_date) & (grp['date_end'] <= cap_date)]
             if after.empty:
                 records.append({
                     'model_type': model, 'retrainer': retrainer, 'exp_type': exp,
                     'event': event_name, 'event_date': event_date.date(),
                     'first_retrain': pd.NaT, 'latency_days': np.nan,
                     'latency_windows': np.nan, 'detected': False,
+                    'detection_cap_days': DETECTION_CAP_DAYS,
                 })
             else:
                 first = after.iloc[0]
@@ -181,17 +183,16 @@ def detection_latency(df):
                     'first_retrain': first['date_end'].date(),
                     'latency_days': lat, 'latency_windows': round(lat / 21, 1),
                     'detected': True,
+                    'detection_cap_days': DETECTION_CAP_DAYS,
                 })
     result = pd.DataFrame(records)
     if not result.empty and 'detected' in result.columns:
+        result['is_fastest_per_event'] = False
         for (model, event), grp in result[result['detected']].groupby(['model_type', 'event']):
             fastest_idx = grp['latency_windows'].idxmin()
             result.loc[fastest_idx, 'is_fastest_per_event'] = True
-        if 'is_fastest_per_event' not in result.columns:
-            result['is_fastest_per_event'] = False
-        else:
-            result['is_fastest_per_event'] = result['is_fastest_per_event'].fillna(False)
     return result
+
 
 
 # ── 4. FALSE POSITIVE RATE ──

@@ -25,6 +25,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+from matplotlib.colors import TwoSlopeNorm
+
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 warnings.filterwarnings('ignore', category=FutureWarning)
@@ -532,6 +534,38 @@ def plot_15_drift_overlay():
 
         plt.tight_layout()
         _save(fig, f'fig_15_drift_overlay_{model}.png')
+        
+def plot_dm_heatmap():
+    df = _load('dm_test.csv')
+    if df is None: return
+    for (model, loss), grp in df.groupby(['model_type', 'loss']):
+        msm_names = grp['msm_retrainer'].unique()
+        base_names = grp['baseline_retrainer'].unique()
+        mat = np.full((len(msm_names), len(base_names)), np.nan)
+        for _, row in grp.iterrows():
+            i = list(msm_names).index(row['msm_retrainer'])
+            j = list(base_names).index(row['baseline_retrainer'])
+            sign = -1 if row['msm_better'] else 1
+            mat[i, j] = sign * row['p_value']
+        fig, ax = plt.subplots(figsize=(max(6, len(base_names) * 1.2),
+                                         max(4, len(msm_names) * 0.4)))
+        # green = MSM wins (neg p), red = MSM loses (pos p), white = tie
+        norm = TwoSlopeNorm(vmin=-0.05, vcenter=0, vmax=0.05)
+        im = ax.imshow(mat, cmap='RdYlGn_r', norm=norm, aspect='auto')
+        ax.set_xticks(range(len(base_names)))
+        ax.set_xticklabels([_display_label(b) for b in base_names], rotation=45, ha='right')
+        ax.set_yticks(range(len(msm_names)))
+        ax.set_yticklabels([_display_label(m) for m in msm_names])
+        ax.set_title(f'Diebold-Mariano {loss} — {model}\n(green = MSM sig better, red = MSM sig worse)')
+        for i in range(len(msm_names)):
+            for j in range(len(base_names)):
+                v = mat[i, j]
+                if not np.isnan(v):
+                    sig = '*' if abs(v) < 0.05 else ''
+                    ax.text(j, i, f'{abs(v):.3f}{sig}', ha='center', va='center', fontsize=7)
+        plt.colorbar(im, ax=ax, label='Signed p-value (neg = MSM better)')
+        plt.tight_layout()
+        _save(fig, f'fig_16_dm_heatmap_{model}_{loss}.png')
 
 
 def main():

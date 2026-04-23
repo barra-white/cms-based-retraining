@@ -178,13 +178,13 @@ def main():
     os.makedirs('results/plots', exist_ok=True)
 
     full_df = pd.read_csv('data/processed/standardized_data.csv', parse_dates=['Date'])
-    feat_cols = [c for c in full_df.columns
-                 if c not in ('Date', cfg.TARGET_SECONDARY)]
+    feat_cols = [c for c in full_df.columns if c not in ('Date', cfg.TARGET_SECONDARY)]
     full_df = full_df.dropna(subset=feat_cols).reset_index(drop=True)
 
     records = []
     plot_data = {}
     overlay_data = {}
+    msm_target_tests_done = False  # cache flag
 
     for model in MODELS:
         path = f'results/experiments/{model}/drift_observer/drift_observer_results.csv'
@@ -197,48 +197,63 @@ def main():
 
         msm_graph = obs['graph_msm'].values
         msm_spy   = obs['spy_msm'].values if 'spy_msm' in obs.columns else np.full(len(obs), np.nan)
-        rmse      = obs['rmse'].values
+        rmse      = obs['rmse'].values  # model-specific
         target_secondary = align_target_to_windows(obs, full_df, cfg.TARGET_SECONDARY)
 
-        signals = {'graph_msm': msm_graph, 'spy_msm': msm_spy}
-        targets = {'RMSE': rmse, cfg.TARGET_SECONDARY: target_secondary}
-
-        for sig_name, sig_series in signals.items():
-            for tgt_name, tgt_series in targets.items():
-                xc = cross_corr(sig_series, tgt_series)
-                gr = granger(sig_series, tgt_series)
-
-                best_lag = (max(xc, key=lambda k: abs(xc[k])) if xc else None)
+        # --- MSM vs market target: ONE test total, shared across all models ---
+        if not msm_target_tests_done:
+            for sig_name, sig_series in [('graph_msm', msm_graph), ('spy_msm', msm_spy)]:
+                xc = cross_corr(sig_series, target_secondary)
+                gr = granger(sig_series, target_secondary)
+                best_lag = max(xc, key=lambda k: abs(xc[k])) if xc else None
                 best_corr = xc.get(best_lag, np.nan) if best_lag is not None else np.nan
-
                 if best_lag is not None:
-                    ci_lower, ci_upper = bootstrap_corr_ci(sig_series, tgt_series, best_lag)
+                    ci_lower, ci_upper = bootstrap_corr_ci(sig_series, target_secondary, best_lag)
                 else:
                     ci_lower, ci_upper = np.nan, np.nan
 
                 records.append({
-                    'model_type':          model,
-                    'signal':              sig_name,
-                    'vs':                  tgt_name,
-                    'xc_best_lag':         best_lag,
+                    'model_type': 'shared_across_models',
+                    'signal': sig_name, 'vs': cfg.TARGET_SECONDARY,
+                    'xc_best_lag': best_lag,
                     'xc_corr_at_best_lag': round(best_corr, 4) if not np.isnan(best_corr) else np.nan,
-                    'xc_ci_lower':         ci_lower,
-                    'xc_ci_upper':         ci_upper,
-                    'granger_min_p':       gr['min_p'],
-                    'granger_best_lag':    gr['best_lag'],
-                    'granger_n_obs':       gr.get('n_obs', np.nan),
+                    'xc_ci_lower': ci_lower, 'xc_ci_upper': ci_upper,
+                    'granger_min_p': gr['min_p'],
+                    'granger_best_lag': gr['best_lag'],
+                    'granger_n_obs': gr.get('n_obs', np.nan),
                     'granger_significant': (gr['min_p'] < 0.05
-                                            if not np.isnan(gr.get('min_p', np.nan))
-                                            else False),
+                                            if not np.isnan(gr.get('min_p', np.nan)) else False),
                 })
+            msm_target_tests_done = True
+
+        # --- MSM vs RMSE: model-specific, legitimately per model ---
+        for sig_name, sig_series in [('graph_msm', msm_graph), ('spy_msm', msm_spy)]:
+            xc = cross_corr(sig_series, rmse)
+            gr = granger(sig_series, rmse)
+            best_lag = max(xc, key=lambda k: abs(xc[k])) if xc else None
+            best_corr = xc.get(best_lag, np.nan) if best_lag is not None else np.nan
+            if best_lag is not None:
+                ci_lower, ci_upper = bootstrap_corr_ci(sig_series, rmse, best_lag)
+            else:
+                ci_lower, ci_upper = np.nan, np.nan
+
+            records.append({
+                'model_type': model, 'signal': sig_name, 'vs': 'RMSE',
+                'xc_best_lag': best_lag,
+                'xc_corr_at_best_lag': round(best_corr, 4) if not np.isnan(best_corr) else np.nan,
+                'xc_ci_lower': ci_lower, 'xc_ci_upper': ci_upper,
+                'granger_min_p': gr['min_p'],
+                'granger_best_lag': gr['best_lag'],
+                'granger_n_obs': gr.get('n_obs', np.nan),
+                'granger_significant': (gr['min_p'] < 0.05
+                                        if not np.isnan(gr.get('min_p', np.nan)) else False),
+            })
 
         plot_data[model] = {
-            'MSM vs RMSE':                    cross_corr(msm_graph, rmse),
+            'MSM vs RMSE': cross_corr(msm_graph, rmse),
             f'MSM vs {cfg.TARGET_SECONDARY}': cross_corr(msm_graph, target_secondary),
         }
         overlay_data[model] = (obs, target_secondary)
-
-        pd.DataFrame(records).to_csv('results/analysis/lead_lag_results.csv', index=False)
 
     result_df = pd.DataFrame(records)
     result_df.to_csv('results/analysis/lead_lag_results.csv', index=False)
@@ -256,7 +271,9 @@ def main():
         print(f'  Saved: {out}')
 
     print('\nDone.')
-
-
+    
+    
+    
+    
 if __name__ == '__main__':
     main()
