@@ -71,18 +71,30 @@ def _tag(exp):
 def section_ranking(L):
     L.append(_h('1. OVERALL STRATEGY RANKING (lower RMSE = better)'))
     df = _load('overall_summary.csv')
-    if df is None:
-        L.append('  [MISSING] overall_summary.csv')
+    pooled = _load('aggregate_metrics.csv')  # ← add this
+    if df is None or pooled is None:
+        L.append('  [MISSING] overall_summary.csv or aggregate_metrics.csv')
         return
 
     for model, grp in df.groupby('model_type'):
         L.append(_sub(f'Model: {model}'))
         grp = grp.sort_values('mean_rmse', ascending=True).reset_index(drop=True)
         top = grp.iloc[0]
+
+        # Look up pooled R² for the top retrainer
+        pooled_row = pooled[(pooled['model_type'] == model)
+                            & (pooled['retrainer'] == top['retrainer'])]
+        pooled_r2 = pooled_row['r2'].iloc[0] if not pooled_row.empty else np.nan
+
         L.append(_f('FINDING',
             f"Best (lowest RMSE): '{top['retrainer']}' "
             f"(RMSE={top['mean_rmse']:.4f} ±{top['std_rmse']:.4f}, "
-            f"MAE={top['mean_mae']:.4f}, R²={top['mean_r2']:.4f})"))
+            f"MAE={top['mean_mae']:.4f}, pooled R²={pooled_r2:.4f})"))
+        L.append(_f('NOTE',
+            'Pooled R² reflects cross-regime predictive value. '
+            'Per-window R² is negative for most strategies because within-window '
+            'target variance is small; this is expected and reflects the absence of '
+            'useful within-window structure rather than poor global fit.'))
 
         msm  = grp[grp['exp_type'].isin(MSM_TYPES)]
         base = grp[grp['exp_type'].isin(BASELINE_TYPES)]
@@ -427,6 +439,125 @@ def section_qlike(L):
         L.append('  QLIKE by type (ascending):')
         for exp, q in grp.groupby('exp_type')['mean_qlike'].mean().sort_values().items():
             L.append(f'    {exp:<20} {q:.6f}{_tag(exp)}')
+# ── 12. Stratified QLIKE ──
+
+def section_stratified_qlike(L):
+    L.append(_h('12. STRATIFIED QLIKE — regime-specific performance'))
+    df = _load('stratified_qlike.csv')
+    if df is None or df.empty:
+        L.append('  [MISSING] stratified_qlike.csv')
+        return
+
+    L.append('')
+    L.append('  QLIKE split by stress vs calm regime.')
+    L.append('  The hypothesis is that MSM advantage concentrates in stress windows.')
+
+    for model, grp in df.groupby('model_type'):
+        L.append(_sub(f'Model: {model}'))
+        if 'mean_qlike_stress' not in grp.columns:
+            continue
+
+        grp = grp.sort_values('mean_qlike_stress', ascending=True)
+        msm  = grp[grp['exp_type'].isin(MSM_TYPES)]
+        base = grp[grp['exp_type'].isin(BASELINE_TYPES)]
+
+        if not msm.empty and not base.empty:
+            bm = msm.iloc[0]
+            bb = base.iloc[0]
+            L.append(_f('STRESS',
+                f"Best MSM stress-QLIKE: {bm['mean_qlike_stress']:.4f} ({bm['retrainer']}) | "
+                f"Best baseline stress-QLIKE: {bb['mean_qlike_stress']:.4f} ({bb['retrainer']}) | "
+                f"Diff: {bm['mean_qlike_stress'] - bb['mean_qlike_stress']:+.4f}"))
+
+            if 'mean_qlike_calm' in grp.columns:
+                grp_calm = grp.sort_values('mean_qlike_calm', ascending=True)
+                bmc = grp_calm[grp_calm['exp_type'].isin(MSM_TYPES)].iloc[0] if not msm.empty else None
+                bbc = grp_calm[grp_calm['exp_type'].isin(BASELINE_TYPES)].iloc[0] if not base.empty else None
+                if bmc is not None and bbc is not None:
+                    L.append(_f('CALM',
+                        f"Best MSM calm-QLIKE: {bmc['mean_qlike_calm']:.4f} ({bmc['retrainer']}) | "
+                        f"Best baseline calm-QLIKE: {bbc['mean_qlike_calm']:.4f} ({bbc['retrainer']}) | "
+                        f"Diff: {bmc['mean_qlike_calm'] - bbc['mean_qlike_calm']:+.4f}"))
+
+            stress_gap = bm['mean_qlike_stress'] - bb['mean_qlike_stress']
+            if stress_gap < 0:
+                L.append(_f('FINDING',
+                    'MSM outperforms best baseline in stress windows on QLIKE.'))
+            else:
+                L.append(_f('DETAIL',
+                    f'Stress QLIKE gap (MSM−baseline) = {stress_gap:+.4f}. '
+                    f'MSM is not strictly better in stress on QLIKE.'))
+
+
+# ── 13. Co-firing Analysis ──
+
+def section_cofiring(L):
+    L.append(_h('13. CO-FIRING ANALYSIS — do MSM and baselines fire together?'))
+    df = _load('cofiring_analysis.csv')
+    if df is None or df.empty:
+        L.append('  [MISSING] cofiring_analysis.csv')
+        return
+
+    L.append('')
+    L.append('  High Jaccard overlap means MSM and baseline respond to the same signal.')
+    L.append('  This strengthens the interpretability case: MSM achieves equivalent')
+    L.append('  timing with added causal-level explanation of WHY the retrain fires.')
+
+    for model, grp in df.groupby('model_type'):
+        L.append(_sub(f'Model: {model}'))
+        summary = (
+            grp.groupby('msm_retrainer')
+            .agg(mean_jaccard=('jaccard_overlap', 'mean'),
+                 max_jaccard=('jaccard_overlap', 'max'),
+                 mean_msm_cofire=('pct_msm_cofire', 'mean'))
+            .round(3).reset_index()
+        )
+        for _, row in summary.iterrows():
+            L.append(f"  {row['msm_retrainer'][:35]:<35}  "
+                     f"mean Jaccard with baselines = {row['mean_jaccard']:.3f}  "
+                     f"(max = {row['max_jaccard']:.3f})")
+
+        max_pairs = grp.sort_values('jaccard_overlap', ascending=False).head(3)
+        L.append('\n  Top co-firing pairs:')
+        for _, row in max_pairs.iterrows():
+            L.append(f"    {row['msm_retrainer'][:30]} ↔ {row['baseline_retrainer'][:30]}: "
+                     f"Jaccard={row['jaccard_overlap']:.3f} "
+                     f"({row['n_cofires']}/{row['n_msm_fires']} MSM fires match baseline)")
+            
+# ── 14. Diebold-Mariano ──
+
+def section_dm_test(L):
+    L.append(_h('14. DIEBOLD-MARIANO TEST — forecast comparison with HAC SE'))
+    df = _load('dm_test.csv')
+    if df is None or df.empty:
+        L.append('  [MISSING] dm_test.csv')
+        return
+
+    L.append('')
+    L.append('  Diebold-Mariano with Newey-West HAC variance accounts for serial')
+    L.append('  correlation in loss differentials. This is the standard forecast')
+    L.append('  comparison test in the econometrics literature.')
+    L.append('')
+    L.append('  Negative mean_loss_diff = MSM has lower loss = MSM better.')
+
+    for (model, loss), grp in df.groupby(['model_type', 'loss']):
+        L.append(_sub(f'{model}, {loss} loss'))
+        sig = grp[grp['significant_at_0.05']]
+        if sig.empty:
+            L.append(_f('DETAIL',
+                f'No pairs reach p<0.05. On {loss} with HAC-corrected variance, '
+                f'MSM and best baselines are statistically indistinguishable.'))
+            continue
+        wins = sig[sig['msm_better']]
+        losses = sig[~sig['msm_better']]
+        L.append(f'  MSM significantly better: {len(wins)}/{len(grp)} pairs')
+        L.append(f'  MSM significantly worse:  {len(losses)}/{len(grp)} pairs')
+        for _, row in wins.iterrows():
+            L.append(f"    [WIN]  {row['msm_retrainer'][:25]} vs {row['baseline_retrainer'][:25]}: "
+                     f"Δ={row['mean_loss_diff']:+.5f}, p={row['p_value']:.4f}")
+        for _, row in losses.iterrows():
+            L.append(f"    [LOSS] {row['msm_retrainer'][:25]} vs {row['baseline_retrainer'][:25]}: "
+                     f"Δ={row['mean_loss_diff']:+.5f}, p={row['p_value']:.4f}")
 
 def main():
     lines = [
@@ -447,6 +578,9 @@ def main():
     section_lead_lag(lines)
     section_bootstrap_ci(lines)
     section_qlike(lines)
+    section_stratified_qlike(lines)
+    section_cofiring(lines)
+    section_dm_test(lines)
 
     report = '\n'.join(lines)
     print(report)

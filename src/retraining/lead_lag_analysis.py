@@ -20,6 +20,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from statsmodels.tsa.stattools import grangercausalitytests
+from arch.bootstrap import StationaryBootstrap
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as cfg
@@ -48,22 +49,27 @@ def cross_corr(a, b, max_lag=MAX_LAG_XC):
     return corrs
 
 
-def bootstrap_corr_ci(a, b, lag, n_bootstrap=N_BOOTSTRAP, seed=42):
-    rng = np.random.default_rng(seed)
+def bootstrap_corr_ci(a, b, lag, n_bootstrap=N_BOOTSTRAP, seed=42, block_length=10):
+    """Stationary block bootstrap for cross-correlation at a given lag."""
     valid = ~(np.isnan(a) | np.isnan(b))
     a, b = a[valid], b[valid]
     if lag > 0:
         a, b = a[:-lag], b[lag:]
     elif lag < 0:
         a, b = a[-lag:], b[:lag]
-    if len(a) < 10:
+    if len(a) < max(20, 2 * block_length):
         return (np.nan, np.nan)
+
+    # Bootstrap pairs together to preserve cross-series structure
+    paired = np.column_stack([a, b])
+    bs = StationaryBootstrap(block_length, paired, seed=seed)
+
     boot_corrs = []
-    for _ in range(n_bootstrap):
-        idx = rng.integers(0, len(a), size=len(a))
-        c = np.corrcoef(a[idx], b[idx])[0, 1]
-        if not np.isnan(c):
-            boot_corrs.append(c)
+    for data in bs.bootstrap(n_bootstrap):
+        sample = data[0][0]
+        if np.var(sample[:, 0]) > 0 and np.var(sample[:, 1]) > 0:
+            boot_corrs.append(np.corrcoef(sample[:, 0], sample[:, 1])[0, 1])
+
     if not boot_corrs:
         return (np.nan, np.nan)
     return (round(float(np.percentile(boot_corrs, 2.5)), 4),

@@ -24,7 +24,9 @@ from retrainers import (
     MSMTimeoutRetrainer,
     CausalFeatureRetrainer,
     DriftSignalObserverRetrainer,
-
+    ADWINRevisedRetrainer,
+    StrengthWeightedMSMRetrainer,
+    FusedMSMRetrainer
 )
 
 np.random.seed(42)
@@ -149,6 +151,41 @@ def build_msm_configs():
     return configs
 
 
+def build_weighted_msm_configs():
+    configs = []
+    # Re-tune thresholds — strength-weighted MSM is smaller-valued than binary
+    WEIGHTED_TAU_1 = [0.35, 0.45, 0.55]
+    WEIGHTED_TAU_2 = [0.25, 0.35, 0.45]
+    for t1 in WEIGHTED_TAU_1:
+        for t2 in WEIGHTED_TAU_2:
+            if t2 >= t1 or abs(t1 - t2) < 0.04:
+                continue
+            for lb in LOOKBACK:
+                name = f'weighted_msm_tau_1_{t1}_tau_2_{t2}_lb_{lb}'
+                configs.append((name, StrengthWeightedMSMRetrainer,
+                                {'tau_1': t1, 'tau_2': t2, 'lookback': lb}))
+    return configs
+
+
+def build_fused_msm_configs(spy_idx, vix_idx):
+    configs = []
+    for t1 in TAU_1_VALUES:
+        for t2 in TAU_2_VALUES:
+            if t2 >= t1 or abs(t1 - t2) < 0.04:
+                continue
+            for lb in LOOKBACK:
+                name = f'fused_msm_tau_1_{t1}_tau_2_{t2}_lb_{lb}'
+                configs.append((name, FusedMSMRetrainer,
+                                {'tau_1': t1, 'tau_2': t2, 'lookback': lb,
+                                 'spy_idx': spy_idx, 'vix_idx': vix_idx}))
+    return configs
+
+def build_revised_adwin_configs():
+    return [
+        (f'adwin_revised_delta_{delta}', ADWINRevisedRetrainer, {"delta": delta})
+        for delta in ADWIN_DELTAS
+    ]
+
 # ----- SINGLE EXPERIMENT RUNNER -----
 
 def run_experiment(name, cls, kwargs, base_args, all_graphs):
@@ -268,6 +305,10 @@ def main():
     print(f"Causal graph monitoring: '{GRAPH_MONITOR_VAR}' at index {target_idx_in_graph}")
     print(f"Forecast target (regression): '{cfg.TARGET_PRIMARY}'")
 
+    
+    VIX_IDX = graph_var_names.index('VIX_ld')
+    print(f"VIX_ld index in graph: {VIX_IDX}")
+    
     base_args_temp = dict(
         df=df,
         feature_cols=feature_cols,
@@ -288,6 +329,9 @@ def main():
         configs += build_random_configs()
         configs += build_msm_configs()
         configs += build_spy_msm_configs(target_idx_in_graph)
+        configs += build_weighted_msm_configs()
+        configs += build_fused_msm_configs(target_idx_in_graph, VIX_IDX)
+        configs += build_revised_adwin_configs()
         configs += build_timeout_msm_configs()
         for tau1 in TAU_1_VALUES:
             for tau2 in TAU_2_VALUES:

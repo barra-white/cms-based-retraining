@@ -23,6 +23,7 @@ import sys
 import numpy as np
 import pandas as pd
 from scipy.stats import wilcoxon
+from arch.bootstrap import StationaryBootstrap
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as cfg
@@ -158,14 +159,18 @@ def effect_sizes(df):
     return pd.DataFrame(records)
 
 
-def bootstrap_rmse_ci(df, n_bootstrap=1000, seed=42):
+def bootstrap_rmse_ci(df, n_bootstrap=1000, seed=42, block_length=10):
+    """
+    Stationary block bootstrap (Politis-Romano 1994) accounts for serial
+    correlation in per-window RMSE. Standard iid bootstrap would produce
+    over-narrow CIs on autocorrelated time series.
+    """
     records = []
-    rng = np.random.default_rng(seed)
 
     for model, model_df in df.groupby('model_type'):
         pivot = model_df.pivot_table(
-            index='date_start', columns='retrainer', values='rmse'
-        ).dropna()
+            index='date_end', columns='retrainer', values='rmse'    # was date_start
+        ).sort_index().dropna()
         if pivot.empty:
             continue
 
@@ -174,10 +179,11 @@ def bootstrap_rmse_ci(df, n_bootstrap=1000, seed=42):
             values = pivot[retrainer].values
             if len(values) < 10:
                 continue
-            boot_means = []
-            for _ in range(n_bootstrap):
-                sample = values[rng.integers(0, len(values), size=len(values))]
-                boot_means.append(sample.mean())
+
+            # Stationary bootstrap on the ordered RMSE series
+            bs = StationaryBootstrap(block_length, values, seed=seed)
+            boot_means = np.array([x[0][0].mean() for x in bs.bootstrap(n_bootstrap)])
+
             model_records.append({
                 'model_type': model,
                 'retrainer':  retrainer,
@@ -186,9 +192,10 @@ def bootstrap_rmse_ci(df, n_bootstrap=1000, seed=42):
                 'ci_lower':   round(np.percentile(boot_means, 2.5), 4),
                 'ci_upper':   round(np.percentile(boot_means, 97.5), 4),
                 'n_windows':  len(values),
+                'block_length': block_length,
             })
 
-        # Best baseline = lowest mean RMSE among baseline exp_types.
+        # Best-baseline overlap flagging logic stays the same
         best_baseline_ci = None
         for r in model_records:
             if r['exp_type'] in BASELINE_TYPES:

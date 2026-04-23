@@ -21,15 +21,16 @@ def in_transition_window(date, events=None, window_days=None):
 
 # Experiment type classification
 EXP_TYPE_PREFIXES = [
+    'weighted_msm', 'fused_msm', 'revised_adwin',
     'spy_msm', 'timeout_msm', 'msm', 'causal',
     'fixed', 'perf', 'adwin', 'random', 'static', 'drift_observer'
 ]
 
 # IMPORTANT: perf and adwin are now treated as baselines, not as "signal-driven"
 # competitors. Your thesis compares MSM against all existing retrainers.
-MSM_TYPES      = {'msm', 'spy_msm', 'timeout_msm', 'causal'}
-BASELINE_TYPES = {'static', 'random', 'fixed', 'perf', 'adwin'}
-SIGNAL_DRIVEN  = {'msm', 'spy_msm', 'timeout_msm', 'causal', 'adwin', 'perf'}
+MSM_TYPES      = {'msm', 'spy_msm', 'timeout_msm', 'causal', 'weighted_msm', 'fused_msm'}
+BASELINE_TYPES = {'static', 'random', 'fixed', 'perf', 'adwin', 'revised_adwin'}
+SIGNAL_DRIVEN  = {'msm', 'spy_msm', 'timeout_msm', 'causal', 'adwin', 'perf', 'revised_adwin'}
 
 # Primary forecasting target (REGRESSION)
 # 5-day forward log realised variance. Continuous float. The standard

@@ -164,7 +164,7 @@ def detection_latency(df):
     for (model, retrainer), grp in retrains.groupby(['model_type', 'retrainer']):
         exp = get_experiment_type(retrainer)
         for event_name, event_date in STRESS_EVENTS.items():
-            after = grp[grp['date_start'] >= event_date]
+            after = grp[grp['date_end'] >= event_date]
             if after.empty:
                 records.append({
                     'model_type': model, 'retrainer': retrainer, 'exp_type': exp,
@@ -174,11 +174,11 @@ def detection_latency(df):
                 })
             else:
                 first = after.iloc[0]
-                lat = (first['date_start'] - event_date).days
+                lat = (first['date_end'] - event_date).days
                 records.append({
                     'model_type': model, 'retrainer': retrainer, 'exp_type': exp,
                     'event': event_name, 'event_date': event_date.date(),
-                    'first_retrain': first['date_start'].date(),
+                    'first_retrain': first['date_end'].date(),
                     'latency_days': lat, 'latency_windows': round(lat / 21, 1),
                     'detected': True,
                 })
@@ -203,9 +203,9 @@ def false_positive_rate(df):
             'model_type', 'retrainer', 'exp_type', 'total_retrains',
             'true_positives', 'false_positives', 'fpr', 'precision',
         ])
-    retrains['in_stress'] = retrains['date_start'].apply(in_stress_window)
+    retrains['in_stress'] = retrains['date_end'].apply(in_stress_window)
 
-    all_dates = df['date_start'].drop_duplicates()
+    all_dates = df['date_end'].drop_duplicates()
     n_stress  = all_dates.apply(in_stress_window).sum()
     baseline_fpr = 1 - (n_stress / len(all_dates)) if len(all_dates) > 0 else np.nan
 
@@ -304,7 +304,7 @@ def stress_period_rmse(df):
     reversed wherever this column is consumed.
     '''
     data = df.copy()
-    data['regime'] = data['date_start'].apply(
+    data['regime'] = data['date_end'].apply(
         lambda d: 'stress' if in_stress_window(d) else 'calm'
     )
     agg = (
@@ -451,7 +451,7 @@ def friedman_ranks(df):
 
 def regime_retrain_rate(df):
     data = df.copy()
-    data['regime'] = data['date_start'].apply(
+    data['regime'] = data['date_end'].apply(
         lambda d: 'stress' if in_stress_window(d) else 'calm'
     )
     rate = (
@@ -495,7 +495,7 @@ def stress_window_robustness(df):
             )
 
         data = df.copy()
-        data['regime'] = data['date_start'].apply(lambda d: 'stress' if _in(d) else 'calm')
+        data['regime'] = data['date_end'].apply(lambda d: 'stress' if _in(d) else 'calm')
 
         pivot = (
             data.groupby(['model_type', 'retrainer', 'exp_type', 'regime'])
@@ -593,30 +593,142 @@ def qlike_summary(df):
     ).astype(int)
     return out
 
-def transition_period_rmse(df):
-    """RMSE during ±10-day transition windows vs calm. This is where MSM
-    advantage should appear, not in sustained-stress periods."""
+
+# ── 15. STRATIFIED QLIKE (by regime) ──
+
+def stratified_qlike(df):
+    """
+    QLIKE split by stress vs calm regime. Expected finding: MSM advantage
+    is concentrated in stress windows because stress is exactly when causal
+    structure breaks down. Calm windows may show narrower or inverted margin.
+    """
+    if 'qlike' not in df.columns:
+        return pd.DataFrame()
+
     data = df.copy()
-    data['regime'] = data['date_start'].apply(
-        lambda d: 'transition' if cfg.in_transition_window(d) else 'calm'
+    data['regime'] = data['date_end'].apply(
+        lambda d: 'stress' if in_stress_window(d) else 'calm'
     )
+
     agg = (
         data.groupby(['model_type', 'retrainer', 'exp_type', 'regime'])
-        .agg(mean_rmse=('rmse', 'mean'), std_rmse=('rmse', 'std'), n=('rmse', 'count'))
-        .round(4).reset_index()
+        .agg(mean_qlike=('qlike', 'mean'),
+             std_qlike=('qlike', 'std'),
+             n_windows=('qlike', 'count'))
+        .round(6).reset_index()
     )
+
     pivot = agg.pivot_table(
         index=['model_type', 'retrainer', 'exp_type'],
-        columns='regime', values=['mean_rmse', 'n'],
+        columns='regime', values=['mean_qlike', 'std_qlike', 'n_windows'],
     )
     pivot.columns = ['_'.join(c).strip() for c in pivot.columns]
-    if 'mean_rmse_transition' in pivot.columns and 'mean_rmse_calm' in pivot.columns:
-        pivot['rmse_transition_minus_calm'] = (
-            pivot['mean_rmse_transition'] - pivot['mean_rmse_calm']
-        ).round(4)
-    return pivot.reset_index().sort_values(
-        ['model_type', 'rmse_transition_minus_calm'], ascending=[True, True]
+    pivot = pivot.reset_index()
+
+    if 'mean_qlike_stress' in pivot.columns and 'mean_qlike_calm' in pivot.columns:
+        pivot['qlike_stress_minus_calm'] = (
+            pivot['mean_qlike_stress'] - pivot['mean_qlike_calm']
+        ).round(6)
+
+    return pivot.sort_values(
+        ['model_type', 'mean_qlike_stress'], ascending=[True, True]
+    ).reset_index(drop=True)
+
+
+# ── 16. CO-FIRING ANALYSIS ──
+
+def cofiring_analysis(df):
+    """
+    For each pair (MSM retrainer, baseline retrainer), compute the fraction
+    of retrain events that fire in the same window. High co-firing means
+    MSM and the baseline respond to the same signal — MSM's contribution is
+    interpretability rather than distinct timing. Low co-firing means MSM
+    provides orthogonal information.
+    """
+    records = []
+
+    for model, model_df in df.groupby('model_type'):
+        # Find the best retrainer of each type (by RMSE, ascending)
+        best_per_type = (
+            model_df.groupby(['exp_type', 'retrainer'])['rmse']
+            .mean().reset_index()
+            .sort_values('rmse', ascending=True)
+            .drop_duplicates('exp_type')
+        )
+
+        msm_retrainers = best_per_type[
+            best_per_type['exp_type'].isin(MSM_TYPES)
+        ]['retrainer'].tolist()
+        baseline_retrainers = best_per_type[
+            best_per_type['exp_type'].isin(BASELINE_TYPES - {'static', 'drift_observer'})
+        ]['retrainer'].tolist()
+
+        # Pivot: rows = windows, cols = retrainer, values = retrain_triggered bool
+        pivot = model_df.pivot_table(
+            index='date_end', columns='retrainer',
+            values='retrain_triggered', aggfunc='first'
+        ).fillna(False)
+
+        for msm_name in msm_retrainers:
+            if msm_name not in pivot.columns:
+                continue
+            msm_fires = pivot[msm_name].astype(bool)
+            n_msm_fires = int(msm_fires.sum())
+
+            for base_name in baseline_retrainers:
+                if base_name not in pivot.columns or base_name == msm_name:
+                    continue
+                base_fires = pivot[base_name].astype(bool)
+                n_base_fires = int(base_fires.sum())
+
+                both = int((msm_fires & base_fires).sum())
+                either = int((msm_fires | base_fires).sum())
+
+                jaccard = both / either if either > 0 else 0.0
+                msm_conditional = both / n_msm_fires if n_msm_fires > 0 else 0.0
+                base_conditional = both / n_base_fires if n_base_fires > 0 else 0.0
+
+                records.append({
+                    'model_type': model,
+                    'msm_retrainer': msm_name,
+                    'baseline_retrainer': base_name,
+                    'n_msm_fires': n_msm_fires,
+                    'n_baseline_fires': n_base_fires,
+                    'n_cofires': both,
+                    'jaccard_overlap': round(jaccard, 4),
+                    'pct_msm_cofire': round(msm_conditional, 4),
+                    'pct_baseline_cofire': round(base_conditional, 4),
+                })
+
+    return pd.DataFrame(records).sort_values(
+        ['model_type', 'msm_retrainer', 'jaccard_overlap'],
+        ascending=[True, True, False]
+    ).reset_index(drop=True)
+
+
+# ── 17. STRESS-CONDITIONAL RMSE BY STRATEGY ──
+
+def stress_conditional_metrics(df):
+    """
+    Full metric breakdown per strategy, separately for stress and calm.
+    More complete than the existing stress_period_rmse function — adds MAE
+    and QLIKE alongside RMSE.
+    """
+    data = df.copy()
+    data['regime'] = data['date_end'].apply(
+        lambda d: 'stress' if in_stress_window(d) else 'calm'
     )
+
+    agg_dict = {'rmse': ['mean', 'std'], 'mae': ['mean']}
+    if 'qlike' in data.columns:
+        agg_dict['qlike'] = ['mean', 'std']
+
+    agg = (
+        data.groupby(['model_type', 'retrainer', 'exp_type', 'regime'])
+        .agg(agg_dict).round(6)
+    )
+    agg.columns = ['_'.join(c) for c in agg.columns]
+    return agg.reset_index()
 
 # ── MAIN ──
 
@@ -640,9 +752,11 @@ def main():
     _save(retrain_efficiency(df),   'retrain_efficiency.csv')
     _save(cooldown_analysis(df),    'cooldown_analysis.csv')
     _save(stress_period_rmse(df),   'stress_period_rmse.csv')
-    _save(transition_period_rmse(df), 'transition_period_rmse.csv')
     _save(qlike_summary(df),         'qlike_summary.csv')
-
+    _save(stratified_qlike(df),      'stratified_qlike.csv')
+    _save(cofiring_analysis(df),     'cofiring_analysis.csv')
+    _save(stress_conditional_metrics(df), 'stress_conditional_metrics.csv')
+    
     sens = sensitivity_summary(df)
     if not sens.empty:
         _save(sens, 'sensitivity_summary.csv')

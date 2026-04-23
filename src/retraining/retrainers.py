@@ -176,15 +176,20 @@ class BaseRetrainer(ABC):
         y_test = np.asarray(y_test, dtype=float)
         rmse = float(np.sqrt(mean_squared_error(y_test, pred)))
         mae  = float(mean_absolute_error(y_test, pred))
-        # r2 is undefined for zero-variance windows — return NaN then.
-        if np.var(y_test) > 0:
-            r2 = float(r2_score(y_test, pred))
-        else:
-            r2 = np.nan
-        # qlike
-        rv_true = np.exp(y_test)
-        rv_pred = np.clip(np.exp(pred), 1e-10, None)
-        qlike = np.mean(rv_true / rv_pred - np.log(rv_pred / rv_true) - 1)
+        # R² is undefined for zero-variance windows.
+        r2 = float(r2_score(y_test, pred)) if np.var(y_test) > 0 else np.nan
+
+        # QLIKE (Patton 2011). Numerically stable log-space form:
+        #   QLIKE = exp(delta) - delta - 1, where delta = log(rv_true) - log(rv_pred)
+        # Always ≥ 0; equals 0 iff prediction is exact. Asymmetric: underprediction
+        # of variance (delta > 0) is penalised more than overprediction.
+        delta = y_test - pred  # log(rv_true) - log(rv_pred) since both in log space
+        qlike_per_obs = np.exp(delta) - delta - 1
+        qlike = float(np.mean(qlike_per_obs))
+
+        # Sanity assertion — remove after testing if you want speed
+        assert qlike >= -1e-10, f"QLIKE must be non-negative, got {qlike}"
+
         return rmse, mae, r2, qlike, pred, y_test
 
     def in_cooldown(self, w):
@@ -381,6 +386,48 @@ class ADWINRetrainer(BaseRetrainer):
 
 
 
+class ADWINRevisedRetrainer(BaseRetrainer):
+    def __init__(self, *args, delta=0.002, clock=10, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.delta = delta
+        self.clock = clock
+        self.adwin = ADWIN(delta=delta, clock=clock)
+        self._pending_retrain = False
+        self._error_scale = None  # rolling MAD scale for bounded input
+
+    def _reset_run_state(self):
+        self.adwin = ADWIN(delta=self.delta, clock=self.clock)
+        self._pending_retrain = False
+        self._error_scale = None
+
+    def should_retrain(self, w, **kwargs):
+        if not self.results:
+            return False
+        if self._pending_retrain:
+            return True
+        last = self.results[-1]
+        y_true = json.loads(last['y_true'])
+        y_pred = json.loads(last['y_pred'])
+        errors = [abs(float(t) - float(p)) for t, p in zip(y_true, y_pred)]
+
+        # Rolling median-absolute-deviation scale (first few windows set it)
+        if self._error_scale is None:
+            self._error_scale = max(np.median(errors), 1e-3)
+        else:
+            self._error_scale = 0.9 * self._error_scale + 0.1 * max(np.median(errors), 1e-3)
+
+        for e in errors:
+            # Bounded signal via smooth transform; preserves ordering
+            bounded = np.tanh(e / (3 * self._error_scale))
+            self.adwin.update(bounded)
+            if self.adwin.drift_detected:
+                self._pending_retrain = True
+                return True
+        return False
+
+    def _post_retrain_hook(self):
+        self.adwin = ADWIN(delta=self.delta, clock=self.clock)
+        self._pending_retrain = False
 # ---- MSM-based retrainers ----
 class MSMRetrainer(BaseRetrainer):
     def __init__(self, *args, tau_1=0.6, tau_2=0.55, lookback=4, r=2.0, **kwargs):
@@ -619,3 +666,126 @@ class DriftSignalObserverRetrainer(StaticRetrainer):
             'graph_msm': round(gm, 4) if not np.isnan(gm) else np.nan,
             'spy_msm':   round(sm, 4) if not np.isnan(sm) else np.nan,
         }
+
+
+
+class StrengthWeightedMSMRetrainer(MSMRetrainer):
+    """
+    Weighs each edge by its |val_matrix| strength from PCMCI+, averaged over
+    windows where the edge is present. A dominant edge weakening now counts
+    more than a marginal edge flickering near the significance threshold.
+
+    Justification: PCMCI+ already computes edge strength via its CI test's
+    val score (partial correlation magnitude). Binary persistence throws this
+    away. Empirically, weak edges at threshold are noisier signals of structural
+    change than strong edges near threshold.
+    """
+
+    def _edge_strength(self, g, edge):
+        """|val_matrix| for the given edge in graph g, 0 if edge absent."""
+        if edge not in g['edges']:
+            return 0.0
+        src, tgt, lag = edge
+        return abs(float(g['val_matrix'][src, tgt, lag]))
+
+    def compute_graph_msm(self, all_graphs, w):
+        start = max(0, w - self.lookback + 1)
+        recent_windows = all_graphs[start:w + 1]
+        n = len(recent_windows)
+        all_edges = set()
+        for g in recent_windows:
+            all_edges |= g['edges']
+        if not all_edges:
+            return 0.0, {}
+
+        # Strength-weighted persistence: mean |val| across windows where present,
+        # multiplied by presence fraction to penalise flickering edges.
+        edge_scores = {}
+        for e in all_edges:
+            strengths = [self._edge_strength(g, e) for g in recent_windows]
+            present = [s > 0 for s in strengths]
+            persistence = sum(present) / n
+            mean_strength = np.mean([s for s in strengths if s > 0]) if any(present) else 0.0
+            # Composite: persistence × normalised strength.
+            # Clip strength at 1.0 since |partial corr| ∈ [0, 1].
+            edge_scores[e] = persistence * min(mean_strength, 1.0)
+
+        return float(np.mean(list(edge_scores.values()))), edge_scores
+
+    def compute_expanded_msm(self, all_graphs, w, lookback):
+        # Same logic on expanded window
+        start = max(0, w - lookback + 1)
+        recent_windows = all_graphs[start:w + 1]
+        n = len(recent_windows)
+        all_edges = set()
+        for g in recent_windows:
+            all_edges |= g['edges']
+        if not all_edges:
+            return 0.0, {}
+        edge_scores = {}
+        for e in all_edges:
+            strengths = [self._edge_strength(g, e) for g in recent_windows]
+            present = [s > 0 for s in strengths]
+            persistence = sum(present) / n
+            mean_strength = np.mean([s for s in strengths if s > 0]) if any(present) else 0.0
+            edge_scores[e] = persistence * min(mean_strength, 1.0)
+        return float(np.mean(list(edge_scores.values()))), edge_scores
+
+
+
+class FusedMSMRetrainer(MSMRetrainer):
+    """
+    Monitors two subgraphs in parallel: edges into SPY_lr (returns) and edges
+    into VIX_ld (expected volatility). Retrains when the minimum of the two
+    MSM scores drops below threshold — either dimension of market structure
+    breakdown is sufficient.
+
+    Justification: Your forecast target is realized variance. Monitoring only
+    returns' causal structure is theoretically mismatched to what you forecast.
+    VIX is the market's expectation of variance, so edges into VIX directly
+    capture mechanisms driving volatility expectations. Fusing SPY and VIX
+    subgraphs aligns MSM with both directional and variance risk dimensions.
+    """
+
+    def __init__(self, *args, spy_idx=0, vix_idx=4, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.spy_idx = spy_idx
+        self.vix_idx = vix_idx
+
+    def _subgraph_msm(self, all_graphs, w, target_idx):
+        start = max(0, w - self.lookback + 1)
+        recent = all_graphs[start:w + 1]
+        n = len(recent)
+        edges = set()
+        for g in recent:
+            edges |= {e for e in g['edges'] if e[1] == target_idx}
+        if not edges:
+            return 0.0, {}
+        scores = {e: sum(1 for g in recent if e in g['edges']) / n for e in edges}
+        return float(np.mean(list(scores.values()))), scores
+
+    def compute_graph_msm(self, all_graphs, w):
+        spy_msm, spy_scores = self._subgraph_msm(all_graphs, w, self.spy_idx)
+        vix_msm, vix_scores = self._subgraph_msm(all_graphs, w, self.vix_idx)
+        # Fuse via minimum — trigger when EITHER structure fails.
+        fused = min(spy_msm, vix_msm)
+        fused_scores = {**spy_scores, **vix_scores}
+        return fused, fused_scores
+
+    def compute_expanded_msm(self, all_graphs, w, lookback):
+        start = max(0, w - lookback + 1)
+        recent = all_graphs[start:w + 1]
+        n = len(recent)
+
+        spy_edges = set(); vix_edges = set()
+        for g in recent:
+            spy_edges |= {e for e in g['edges'] if e[1] == self.spy_idx}
+            vix_edges |= {e for e in g['edges'] if e[1] == self.vix_idx}
+
+        def _avg(edge_set):
+            if not edge_set:
+                return 0.0
+            return float(np.mean([sum(1 for g in recent if e in g['edges']) / n
+                                  for e in edge_set]))
+
+        return min(_avg(spy_edges), _avg(vix_edges)), {}

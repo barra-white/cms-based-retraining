@@ -271,17 +271,17 @@ def drift_summary(df):
             for exp in ('msm', 'spy_msm', 'timeout_msm', 'adwin', 'perf'):
                 sub = model_df[
                     (model_df['exp_type'] == exp)
-                    & (model_df['date_start'] >= event_date)
+                    & (model_df['date_end'] >= event_date)
                     & model_df['retrain_triggered']
-                ].sort_values('date_start')
+                ].sort_values('date_end')
                 if sub.empty:
                     rows.append({'event': event_name, 'model': model, 'exp_type': exp,
                                  'first_retrain': None, 'latency_days': None, 'detected': False})
                 else:
                     first = sub.iloc[0]
                     rows.append({'event': event_name, 'model': model, 'exp_type': exp,
-                                 'first_retrain': str(first['date_start'].date()),
-                                 'latency_days': (first['date_start'] - event_date).days,
+                                 'first_retrain': str(first['date_end'].date()),
+                                 'latency_days': (first['date_end'] - event_date).days,
                                  'detected': True})
 
     out = pd.DataFrame(rows)
