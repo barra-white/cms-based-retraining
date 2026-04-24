@@ -2,9 +2,10 @@ import pandas as pd
 
 # Stress events used across experiment, analysis, plotting
 STRESS_EVENTS = {
-    'covid_crash':        pd.Timestamp('2020-02-20'),
-    'fed_hikes_2022':     pd.Timestamp('2022-03-16'),
-    'carry_trade_unwind': pd.Timestamp('2024-08-05'),
+    'covid_crash':         pd.Timestamp('2020-02-20'),
+    'fed_hikes_2022':      pd.Timestamp('2022-03-16'),
+    'carry_trade_unwind':  pd.Timestamp('2024-08-05'),
+    'liberation_day_2025': pd.Timestamp('2025-04-02'),
 }
 STRESS_WINDOW_DAYS = 60
 
