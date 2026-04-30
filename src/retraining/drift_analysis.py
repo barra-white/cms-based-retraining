@@ -80,8 +80,10 @@ def plot_msm_drift_signal(df):
         if 'graph_msm' not in best.columns or best['graph_msm'].isna().all():
             continue
 
-        fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(10, 6), sharex=True,
-                                             gridspec_kw={'height_ratios': [1.2, 1]})
+        fig, (ax_top, ax_bot) = plt.subplots(
+            2, 1, figsize=(10, 6), sharex=True,
+            gridspec_kw={'height_ratios': [1.2, 1]}
+            )
 
         ax_top.plot(best['date_end'], best['graph_msm'],
                     color='#1976D2', linewidth=1.2, label='Graph MSM')
@@ -96,9 +98,11 @@ def plot_msm_drift_signal(df):
 
         triggers = best[best['retrain_triggered']]
         if not triggers.empty:
-            ax_top.scatter(triggers['date_end'], triggers['graph_msm'],
-                           color='#C62828', s=40, marker='^', zorder=5,
-                           label=f'Retrain ({len(triggers)})')
+            ax_top.scatter(
+                triggers['date_end'], triggers['graph_msm'],
+                color='#C62828', s=40, marker='^', zorder=5,
+                label=f'Retrain ({len(triggers)})'
+            )
 
         _shade_stress(ax_top)
         ax_top.set_ylim(0, 1.05)
@@ -108,8 +112,10 @@ def plot_msm_drift_signal(df):
         ax_top.grid(alpha=0.2)
 
         msm_rmse = best.set_index('date_end')['rmse'].rolling(5, min_periods=1).mean()
-        static_rmse = (static.set_index('date_end')['rmse'].rolling(5, min_periods=1).mean()
-                       if not static.empty else pd.Series(dtype=float))
+        static_rmse = (
+            static.set_index('date_end')['rmse'].rolling(5, min_periods=1).mean()
+            if not static.empty else pd.Series(dtype=float)
+        )
         ax_bot.plot(msm_rmse.index, msm_rmse.values, color='#1976D2', lw=1.2,
                     label='MSM (best)')
         if not static_rmse.empty:
@@ -172,15 +178,19 @@ def plot_causal_structure_collapse(df):
     fig, ax1 = plt.subplots(figsize=(10, 4.5))
 
     x_col = 'date_end' if 'date_end' in summary.columns and summary['date_end'].notna().any() else 'date_start'
-    ax1.plot(summary[x_col], summary['spy_parents'],
-             color='#7B1FA2', lw=1.2, label='SPY causal parents (count)')
+    ax1.plot(
+        summary[x_col], summary['spy_parents'],
+        color='#7B1FA2', lw=1.2, label='SPY causal parents (count)'
+    )
     ax1.set_ylabel('Edges into SPY', color='#7B1FA2')
     ax1.tick_params(axis='y', colors='#7B1FA2')
 
     ax2 = ax1.twinx()
     if 'graph_msm' in best_msm.columns:
-        ax2.plot(best_msm['date_end'], best_msm['graph_msm'],
-                 color='#1976D2', lw=1.2, alpha=0.85, label='Graph MSM')
+        ax2.plot(
+            best_msm['date_end'], best_msm['graph_msm'],
+            color='#1976D2', lw=1.2, alpha=0.85, label='Graph MSM'
+        )
     ax2.set_ylabel('Graph MSM', color='#1976D2')
     ax2.tick_params(axis='y', colors='#1976D2')
     ax2.set_ylim(0, 1.05)
@@ -247,12 +257,14 @@ def compute_lead_lag_retrainer(df, max_lag=10):
             peak_idx = grp['correlation'].abs().idxmax()
             peak_lag = grp.loc[peak_idx, 'lag']
             peak_corr = grp.loc[peak_idx, 'correlation']
-            ax.axvline(peak_lag, color='#C62828', ls='--', lw=1,
-                       label=f'Peak at lag={peak_lag} (r={peak_corr:.3f})')
+            ax.axvline(
+                peak_lag, color='#C62828', ls='--', lw=1,
+                label=f'Peak at lag={peak_lag} (r={peak_corr:.3f})'
+            )
             ax.axvline(0, color='black', lw=0.5)
             ax.set_xlabel('Lag (positive = MSM leads RMSE)')
             ax.set_ylabel('Cross-correlation')
-            ax.set_title(f'MSM–RMSE Lead-Lag (retrainer run) — {model}')
+            ax.set_title(f'MSM-RMSE Lead-Lag (retrainer run) — {model}')
             ax.legend(fontsize=8)
             ax.grid(alpha=0.2)
             plt.tight_layout()
@@ -275,14 +287,26 @@ def drift_summary(df):
                     & model_df['retrain_triggered']
                 ].sort_values('date_end')
                 if sub.empty:
-                    rows.append({'event': event_name, 'model': model, 'exp_type': exp,
-                                 'first_retrain': None, 'latency_days': None, 'detected': False})
+                    rows.append(
+                        {
+                            'event': event_name,
+                            'model': model,
+                            'exp_type': exp,
+                            'first_retrain': None,
+                            'latency_days': None,
+                            'detected': False
+                        }
+                    )
                 else:
                     first = sub.iloc[0]
-                    rows.append({'event': event_name, 'model': model, 'exp_type': exp,
-                                 'first_retrain': str(first['date_end'].date()),
-                                 'latency_days': (first['date_end'] - event_date).days,
-                                 'detected': True})
+                    rows.append({
+                        'event': event_name,
+                        'model': model,
+                        'exp_type': exp,
+                        'first_retrain': str(first['date_end'].date()),
+                        'latency_days': (first['date_end'] - event_date).days,
+                        'detected': True
+                    })
 
     out = pd.DataFrame(rows)
     path = os.path.join(ANALYSIS_DIR, 'drift_summary.csv')

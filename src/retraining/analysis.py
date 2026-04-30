@@ -16,7 +16,6 @@ Key outputs (each answers a specific thesis claim):
     stress_period_rmse.csv  — RQ2: stress vs calm robustness
     sensitivity_summary.csv — RQ3: hyperparameter robustness
     msm_summary.csv         — RQ3: MSM distribution sanity
-    ... and others
 '''
 
 import ast
@@ -27,6 +26,7 @@ import sys
 
 import numpy as np
 import pandas as pd
+import json as _json
 from scipy.stats import friedmanchisquare, pearsonr
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
@@ -58,8 +58,10 @@ def load_results(path='results/experiments/all_results.csv'):
         df = pd.read_csv(partial, parse_dates=['date_start', 'date_end'])
     else:
         parts = glob.glob('results/experiments/*/*/*_results.csv')
-        parts = [p for p in parts if os.path.basename(p) not in
-                 ('all_results.csv', 'all_results_partial.csv')]
+        parts = [
+            p for p in parts if os.path.basename(p) not in
+            ('all_results.csv', 'all_results_partial.csv')
+        ]
         if not parts:
             raise FileNotFoundError("No results found. Run experiment.py first.")
         df = pd.concat(
@@ -75,8 +77,11 @@ def load_results(path='results/experiments/all_results.csv'):
         if col in df.columns:
             df[col] = (
                 df[col].astype(str).str.strip().str.lower()
-                .map({'true': True, 'false': False, '1': True, '0': False,
-                      '1.0': True, '0.0': False})
+                .map({
+                    'true': True, 'false': False,
+                    '1': True, '0': False,
+                    '1.0': True, '0.0': False
+                })
                 .fillna(False)
             )
 
@@ -85,7 +90,6 @@ def load_results(path='results/experiments/all_results.csv'):
 
 
 # ── 1. OVERALL SUMMARY ──
-
 def overall_summary(df):
     out = (
         df.groupby(['model_type', 'retrainer', 'exp_type'])
@@ -95,8 +99,8 @@ def overall_summary(df):
             median_rmse=('rmse', 'median'),
             mean_mae=('mae', 'mean'),
             mean_r2=('r2', 'mean'),
-            mean_qlike=('qlike', 'mean'),   # ← ADD
-            std_qlike=('qlike', 'std'),     # ← ADD
+            mean_qlike=('qlike', 'mean'),
+            std_qlike=('qlike', 'std'), 
             retrains=('retrain_triggered', 'sum'),
             signals_fired=('signal_fired', 'sum'),
             cooldowns_hit=('cooldown_active', 'sum'),
@@ -144,7 +148,7 @@ def regression_metrics(df):
             'rmse':         round(rmse,     6) if not np.isnan(rmse)     else np.nan,
             'mae':          round(mae,      6) if not np.isnan(mae)      else np.nan,
             'r2':           round(r2,       6) if not np.isnan(r2)       else np.nan,
-            'qlike':        round(qlike,    6) if not np.isnan(qlike)    else np.nan,   # ← ADD
+            'qlike':        round(qlike,    6) if not np.isnan(qlike)    else np.nan,
             'pearson_r':    round(pearson_r,6) if not np.isnan(pearson_r)else np.nan,
             'pearson_p':    round(pearson_p,6) if not np.isnan(pearson_p)else np.nan,
             'n_points':     len(y_true),
@@ -196,7 +200,6 @@ def detection_latency(df):
 
 
 # ── 4. FALSE POSITIVE RATE ──
-
 def false_positive_rate(df):
     retrains = df[df['retrain_triggered']].copy()
     if retrains.empty:
@@ -227,14 +230,14 @@ def false_positive_rate(df):
 
 
 # ── 5. BEST CONFIGS ──
-
 def best_configs(df, top_k=3):
     summary = (
         df.groupby(['model_type', 'exp_type', 'retrainer'])
-        .agg(mean_rmse=('rmse', 'mean'), std_rmse=('rmse', 'std'),
-             mean_mae=('mae', 'mean'), mean_r2=('r2', 'mean'),
-             retrains=('retrain_triggered', 'sum'), windows=('rmse', 'count'))
-        .round(4).reset_index()
+        .agg(
+            mean_rmse=('rmse', 'mean'), std_rmse=('rmse', 'std'),
+            mean_mae=('mae', 'mean'), mean_r2=('r2', 'mean'),
+            retrains=('retrain_triggered', 'sum'), windows=('rmse', 'count')
+        ).round(4).reset_index()
     )
     summary['rank'] = (
         summary.groupby(['model_type', 'exp_type'])['mean_rmse']
@@ -248,10 +251,11 @@ def best_configs(df, top_k=3):
 
 
 # ── 6. RETRAIN EFFICIENCY ──
-
 def retrain_efficiency(df, n_windows=3):
-    '''For each retrain event, compute RMSE change (pre_rmse - post_rmse).
-    Positive = RMSE dropped after retrain = improvement.'''
+    '''
+    For each retrain event, compute RMSE change (pre_rmse - post_rmse).
+    Positive = RMSE dropped after retrain = improvement.
+    '''
     records = []
     for (model, retrainer), grp in df.groupby(['model_type', 'retrainer']):
         grp = grp.sort_values('window').reset_index(drop=True)
@@ -262,7 +266,7 @@ def retrain_efficiency(df, n_windows=3):
             pre  = grp.iloc[max(0, idx - n_windows):idx]['rmse'].mean()
             post = grp.iloc[idx + 1: idx + 1 + n_windows]['rmse'].mean()
             if not (np.isnan(pre) or np.isnan(post)):
-                gains.append(pre - post)   # positive => RMSE dropped
+                gains.append(pre - post)   # positive -> RMSE dropped
         n_pos = sum(1 for g in gains if g > 0)
         records.append({
             'model_type': model, 'retrainer': retrainer, 'exp_type': exp,
@@ -278,7 +282,6 @@ def retrain_efficiency(df, n_windows=3):
 
 
 # ── 7. COOLDOWN ANALYSIS ──
-
 def cooldown_analysis(df):
     records = []
     for (model, retrainer), grp in df.groupby(['model_type', 'retrainer']):
@@ -297,13 +300,7 @@ def cooldown_analysis(df):
 
 
 # ── 8. STRESS vs CALM (RMSE) ──
-
 def stress_period_rmse(df):
-    '''
-    NOTE: positive rmse_stress_minus_calm now means the retrainer is WORSE in
-    stress (higher error). Flipped semantics vs classification; interpretation
-    reversed wherever this column is consumed.
-    '''
     data = df.copy()
     data['regime'] = data['date_end'].apply(
         lambda d: 'stress' if in_stress_window(d) else 'calm'
@@ -335,7 +332,6 @@ def stress_period_rmse(df):
 
 
 # ── 9. SENSITIVITY SUMMARY ──
-
 def sensitivity_summary(df):
     sub = df[df['exp_type'].isin(MSM_TYPES)].copy()
     if sub.empty:
@@ -356,9 +352,11 @@ def sensitivity_summary(df):
 
     out = (
         sub.groupby(['model_type', 'exp_type', 'tau_1', 'tau_2', 'lookback'])
-        .agg(mean_rmse=('rmse', 'mean'), std_rmse=('rmse', 'std'),
-             mean_mae=('mae', 'mean'),
-             retrains=('retrain_triggered', 'sum'))
+        .agg(
+            mean_rmse=('rmse', 'mean'), std_rmse=('rmse', 'std'),
+            mean_mae=('mae', 'mean'),
+            retrains=('retrain_triggered', 'sum')
+        )
         .round(4)
         .sort_values(['model_type', 'exp_type', 'mean_rmse'], ascending=[True, True, True])
         .reset_index()
@@ -381,16 +379,17 @@ def causal_feature_usage(df):
     if causal.empty:
         return pd.DataFrame()
 
-    import json as _json
     records = []
     for model, grp in causal.groupby('model_type'):
         total = len(grp)
         counts = {}
         for _, row in grp.iterrows():
             try:
-                feats = (_json.loads(row['active_features'])
-                         if isinstance(row['active_features'], str)
-                         else row['active_features'])
+                feats = (
+                    _json.loads(row['active_features'])
+                    if isinstance(row['active_features'], str)
+                    else row['active_features']
+                )
                 for f in feats:
                     counts[f] = counts.get(f, 0) + 1
             except (_json.JSONDecodeError, TypeError):
@@ -409,7 +408,6 @@ def causal_feature_usage(df):
 
 
 # ── 11. FRIEDMAN RANKS (on RMSE) ──
-
 def friedman_ranks(df):
     rank_records = []
     test_records = []
@@ -449,7 +447,6 @@ def friedman_ranks(df):
 
 
 # ── 12. REGIME RETRAIN RATE ──
-
 def regime_retrain_rate(df):
     data = df.copy()
     data['regime'] = data['date_end'].apply(
@@ -485,7 +482,6 @@ def regime_retrain_rate(df):
 
 
 # ── 13. STRESS WINDOW ROBUSTNESS ──
-
 def stress_window_robustness(df):
     records = []
     for window_days in ROBUSTNESS_WINDOW_DAYS:
@@ -501,8 +497,10 @@ def stress_window_robustness(df):
         pivot = (
             data.groupby(['model_type', 'retrainer', 'exp_type', 'regime'])
             .agg(mean_rmse=('rmse', 'mean')).reset_index()
-            .pivot_table(index=['model_type', 'retrainer', 'exp_type'],
-                         columns='regime', values='mean_rmse').reset_index()
+            .pivot_table(
+                index=['model_type', 'retrainer', 'exp_type'],
+                columns='regime', values='mean_rmse'
+            ).reset_index()
         )
         pivot.columns.name = None
         if 'stress' in pivot.columns and 'calm' in pivot.columns:
@@ -541,7 +539,6 @@ def stress_window_robustness(df):
 
 
 # ── 14. MSM SUMMARY ──
-
 def msm_summary(df):
     if 'graph_msm' not in df.columns:
         return pd.DataFrame()
@@ -596,7 +593,6 @@ def qlike_summary(df):
 
 
 # ── 15. STRATIFIED QLIKE (by regime) ──
-
 def stratified_qlike(df):
     """
     QLIKE split by stress vs calm regime. Expected finding: MSM advantage
@@ -613,9 +609,11 @@ def stratified_qlike(df):
 
     agg = (
         data.groupby(['model_type', 'retrainer', 'exp_type', 'regime'])
-        .agg(mean_qlike=('qlike', 'mean'),
-             std_qlike=('qlike', 'std'),
-             n_windows=('qlike', 'count'))
+        .agg(
+            mean_qlike=('qlike', 'mean'),
+            std_qlike=('qlike', 'std'),
+            n_windows=('qlike', 'count')
+        )
         .round(6).reset_index()
     )
 
@@ -637,7 +635,6 @@ def stratified_qlike(df):
 
 
 # ── 16. CO-FIRING ANALYSIS ──
-
 def cofiring_analysis(df):
     """
     For each pair (MSM retrainer, baseline retrainer), compute the fraction
@@ -708,7 +705,6 @@ def cofiring_analysis(df):
 
 
 # ── 17. STRESS-CONDITIONAL RMSE BY STRATEGY ──
-
 def stress_conditional_metrics(df):
     """
     Full metric breakdown per strategy, separately for stress and calm.
@@ -738,8 +734,10 @@ def main():
     os.makedirs(out, exist_ok=True)
 
     df = load_results()
-    print(f'Loaded {len(df):,} rows | {df["model_type"].nunique()} models | '
-          f'{df["retrainer"].nunique()} retrainers')
+    print(
+        f'Loaded {len(df):,} rows | {df["model_type"].nunique()} models | '
+        f'{df["retrainer"].nunique()} retrainers'
+    )
 
     def _save(data, name):
         data.to_csv(f'{out}/{name}', index=False)

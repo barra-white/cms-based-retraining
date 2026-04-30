@@ -175,9 +175,13 @@ def build_fused_msm_configs(spy_idx, vix_idx):
                 continue
             for lb in LOOKBACK:
                 name = f'fused_msm_tau_1_{t1}_tau_2_{t2}_lb_{lb}'
-                configs.append((name, FusedMSMRetrainer,
-                                {'tau_1': t1, 'tau_2': t2, 'lookback': lb,
-                                 'spy_idx': spy_idx, 'vix_idx': vix_idx}))
+                configs.append((
+                    name, FusedMSMRetrainer,
+                    {
+                        'tau_1': t1, 'tau_2': t2, 'lookback': lb,
+                        'spy_idx': spy_idx, 'vix_idx': vix_idx
+                    }
+                ))
     return configs
 
 def build_revised_adwin_configs():
@@ -292,9 +296,16 @@ def main():
     if missing:
         raise ValueError(f"graph_var_names: expected variables missing from df: {missing}")
     graph_var_names = [v for v in ORIGINAL_GRAPH_VARS if v in df.columns]
-    extra = [c for c in df.columns if c not in ('Date',) + tuple(ORIGINAL_GRAPH_VARS)
-             and c not in (cfg.TARGET_SECONDARY, 'SPY_logrv_5d',
-                           'SPY_logrv_20d', 'SPY_vol_change_5d', 'SPY_vol_direction_5d')]
+    extra = [
+        c for c in df.columns if c not in ('Date',) + tuple(ORIGINAL_GRAPH_VARS)
+        and c not in (
+            cfg.TARGET_SECONDARY,
+            'SPY_logrv_5d',
+            'SPY_logrv_20d',
+            'SPY_vol_change_5d',
+            'SPY_vol_direction_5d'
+        )
+    ]
     if extra:
         print(f"  WARNING: extra columns in df not in original graph vars (ignored): {extra}")
     if len(graph_var_names) != 11:

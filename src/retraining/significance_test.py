@@ -203,8 +203,10 @@ def bootstrap_rmse_ci(df, n_bootstrap=1000, seed=42, block_length=10):
                     best_baseline_ci = r
         if best_baseline_ci is not None:
             for r in model_records:
-                overlap = (r['ci_lower'] <= best_baseline_ci['ci_upper']
-                           and best_baseline_ci['ci_lower'] <= r['ci_upper'])
+                overlap = (
+                    r['ci_lower'] <= best_baseline_ci['ci_upper']
+                    and best_baseline_ci['ci_lower'] <= r['ci_upper']
+                )
                 r['overlaps_with_best_baseline'] = overlap
                 r['best_baseline'] = best_baseline_ci['retrainer']
 
@@ -230,8 +232,11 @@ def main():
     e.to_csv('results/analysis/effect_size.csv', index=False)
     print(f'  {len(e)} comparisons saved')
     if not e.empty:
-        print(e[['model_type', 'strategy_a', 'strategy_b',
-                 'mean_diff', 'cohens_d', 'effect_label']].to_string(index=False))
+        print(e[[
+            'model_type', 'strategy_a', 'strategy_b',
+            'mean_diff', 'cohens_d', 'effect_label']]
+            .to_string(index=False)
+        )
 
     print('\nBootstrap RMSE confidence intervals...')
     ci = bootstrap_rmse_ci(df)

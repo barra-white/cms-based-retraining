@@ -674,11 +674,6 @@ class StrengthWeightedMSMRetrainer(MSMRetrainer):
     Weighs each edge by its |val_matrix| strength from PCMCI+, averaged over
     windows where the edge is present. A dominant edge weakening now counts
     more than a marginal edge flickering near the significance threshold.
-
-    Justification: PCMCI+ already computes edge strength via its CI test's
-    val score (partial correlation magnitude). Binary persistence throws this
-    away. Empirically, weak edges at threshold are noisier signals of structural
-    change than strong edges near threshold.
     """
 
     def _edge_strength(self, g, edge):
@@ -739,12 +734,6 @@ class FusedMSMRetrainer(MSMRetrainer):
     into VIX_ld (expected volatility). Retrains when the minimum of the two
     MSM scores drops below threshold — either dimension of market structure
     breakdown is sufficient.
-
-    Justification: Your forecast target is realized variance. Monitoring only
-    returns' causal structure is theoretically mismatched to what you forecast.
-    VIX is the market's expectation of variance, so edges into VIX directly
-    capture mechanisms driving volatility expectations. Fusing SPY and VIX
-    subgraphs aligns MSM with both directional and variance risk dimensions.
     """
 
     def __init__(self, *args, spy_idx=0, vix_idx=4, **kwargs):
@@ -785,7 +774,9 @@ class FusedMSMRetrainer(MSMRetrainer):
         def _avg(edge_set):
             if not edge_set:
                 return 0.0
-            return float(np.mean([sum(1 for g in recent if e in g['edges']) / n
-                                  for e in edge_set]))
+            return float(np.mean([
+                sum(1 for g in recent if e in g['edges']) / n
+                for e in edge_set
+            ]))
 
         return min(_avg(spy_edges), _avg(vix_edges)), {}

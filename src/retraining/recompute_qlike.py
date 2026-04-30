@@ -45,10 +45,14 @@ def main():
         fixed += 1
 
     # Rebuild the combined file
-    combined_paths = [p for p in glob.glob("results/experiments/*/*/*_results.csv")
-                      if "all_results" not in os.path.basename(p)]
-    combined = pd.concat([pd.read_csv(p, parse_dates=["date_start", "date_end"])
-                          for p in combined_paths], ignore_index=True)
+    combined_paths = [
+        p for p in glob.glob("results/experiments/*/*/*_results.csv")
+        if "all_results" not in os.path.basename(p)
+    ]
+    combined = pd.concat([
+        pd.read_csv(p, parse_dates=["date_start", "date_end"])
+        for p in combined_paths
+    ], ignore_index=True)
     combined.to_csv("results/experiments/all_results.csv", index=False)
     print(f"Fixed {fixed} files, rebuilt all_results.csv")
 

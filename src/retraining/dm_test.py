@@ -173,8 +173,10 @@ def main():
             sig = sub[sub['significant_at_0.05']]
             msm_wins = sig[sig['msm_better']]
             msm_loses = sig[~sig['msm_better']]
-            print(f'  {loss}: {len(msm_wins)} MSM wins, {len(msm_loses)} MSM losses '
-                  f'({len(sig)}/{len(sub)} significant)')
+            print(
+                f'  {loss}: {len(msm_wins)} MSM wins, {len(msm_loses)} MSM losses '
+                f'({len(sig)}/{len(sub)} significant)'
+            )
 
 
 if __name__ == '__main__':

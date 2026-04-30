@@ -18,6 +18,3 @@ for col in cols[1:]:
         kpss_p = float('nan') #kpss may fail
         
     print(f"{col:<15} {adf_p:<15.4f} {kpss_p:<15.4f}")
-    
-    
-

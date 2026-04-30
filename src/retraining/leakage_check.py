@@ -22,21 +22,20 @@ target = 'SPY_logrv_5d'
 t = df[target].values
 n = len(t)
 
-# Reconstruct what target at row i "knows about"
-# SPY_logrv_5d[i] = log(sum(SPY_lr[i+1..i+5]^2))
-# So features at row i should not include SPY data from rows i+1..i+5.
-# Your pipeline shifts features by 1, so at row i features come from row i-1.
-# That's safe.
 
-# But — does any FEATURE at time t-1 have information about SPY returns at t+1..t+5?
-# Only through temporal dependence / volatility clustering, which is signal not leakage.
 
 # Paranoid check: compute correlation of each feature with the target WITHOUT shift.
 # If any feature has correlation > 0.9 that isn't a known vol proxy (VIX), flag.
 print('=== Feature-target correlation (unshifted) — high values expected for vol proxies ===')
-feat_cols = [c for c in df.columns if c not in ['Date', 'SPY_lr_local_std',
-                                                  'SPY_logrv_5d', 'SPY_logrv_20d',
-                                                  'SPY_vol_change_5d']]
+feat_cols = [
+    c for c in df.columns if c not in [
+        'Date',
+        'SPY_lr_local_std',
+        'SPY_logrv_5d',
+        'SPY_logrv_20d',
+        'SPY_vol_change_5d'
+    ]
+]
 sub = df[['Date', target] + feat_cols].dropna()
 for f in feat_cols:
     c = sub[[target, f]].corr().iloc[0, 1]

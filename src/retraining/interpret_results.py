@@ -17,7 +17,11 @@ Sections:
     7. Hyperparameter sensitivity (RMSE range)
     8. Causal feature usage
     9. Lead-lag analysis (RQ1 evidence)
-    10. Bootstrap RMSE confidence intervals
+   10. Bootstrap RMSE confidence intervals
+   11. QLIKE loss
+   12. Stratified QLIKE
+   13. Co-firing analysis
+   14. Diebold-Mariano test
 '''
 
 import os
@@ -60,6 +64,18 @@ def _load(name):
         df['exp_type'] = df['retrainer'].apply(get_experiment_type)
     return df
 
+def _drop_observer(df):
+    '''B.1 — exclude drift_observer from any ranking-style table.
+
+    The observer is a measurement instrument (frozen model that logs MSM at
+    every window for the lead-lag analysis), not a retraining strategy. Leaving
+    it in ranking sections produces a duplicate row alongside `static` since
+    they share identical predictions.
+    '''
+    if df is None or df.empty or 'exp_type' not in df.columns:
+        return df
+    return df[df['exp_type'] != 'drift_observer'].copy()
+
 def _tag(exp):
     if exp in MSM_TYPES:      return ' [MSM]'
     if exp in BASELINE_TYPES: return ' [baseline]'
@@ -76,8 +92,7 @@ def section_ranking(L):
         L.append('  [MISSING] overall_summary.csv or aggregate_metrics.csv')
         return
 
-    # Drift observer is a measurement instrument, not a retraining strategy
-    df = df[df['exp_type'] != 'drift_observer'].copy()
+    df = _drop_observer(df)
 
     for model, grp in df.groupby('model_type'):
         L.append(_sub(f'Model: {model}'))
@@ -129,6 +144,8 @@ def section_aggregate_metrics(L):
         L.append('  [MISSING] aggregate_metrics.csv')
         return
 
+    df = _drop_observer(df)  # B.1
+
     L.append('')
     L.append('  Metrics computed on flattened y_true / y_pred across all windows.')
     L.append('  RMSE / MAE lower = better. R² and Pearson r higher = better.')
@@ -167,7 +184,7 @@ def section_stress(L):
         L.append('  [MISSING]')
         return
 
-    df = df[df['exp_type'] != 'drift_observer'].copy()
+    df = _drop_observer(df)
 
     for model, grp in df.groupby('model_type'):
         L.append(_sub(f'Model: {model}'))
@@ -243,7 +260,12 @@ def section_selectivity(L):
 # ── 6. Significance ──
 
 def section_significance(L):
-    L.append(_h("6. STATISTICAL SIGNIFICANCE  (Cohen's d on RMSE; negative ⇒ a better)"))
+    L.append(_h("6. STATISTICAL SIGNIFICANCE  (Cohen's d_z on RMSE; negative ⇒ a better)"))
+    L.append('')
+    L.append("  Cohen's d_z is the paired effect size = mean(a-b) / std(a-b).")
+    L.append('  This is appropriate for paired forecasting comparisons; conventional')
+    L.append("  thresholds 0.2 / 0.5 / 0.8 are applied as a reference but were originally")
+    L.append('  calibrated for the pooled-SD form. See Methodology for full disclosure.')
 
     friedman = _load('friedman_test.csv')
     if friedman is not None:
@@ -263,7 +285,7 @@ def section_significance(L):
 
     effect = _load('effect_size.csv')
     if effect is not None:
-        L.append(_sub("Effect Sizes (Cohen's d; negative = MSM better)"))
+        L.append(_sub("Effect Sizes (Cohen's d_z; negative = MSM better)"))
         for model, grp in effect.groupby('model_type'):
             L.append(f'  {model}:')
             # Rank by most-negative d (= MSM most ahead) first.
@@ -287,8 +309,7 @@ def section_sensitivity(L):
         for exp, sub in grp.groupby('exp_type'):
             rng = sub['mean_rmse'].max() - sub['mean_rmse'].min()
             L.append(f'  {exp}: RMSE range={rng:.4f} across {len(sub)} configs')
-            # 0.02 was the old F1 threshold; for log-RV RMSE (~0.5–1.5 range)
-            # we loosen it slightly.
+            # 0.05 threshold for log-RV RMSE (~0.5–1.5 range)
             if rng <= 0.05:
                 L.append(_f('FINDING', 'Robust plateau — results not sensitive to hyperparameters.'))
             else:
@@ -384,8 +405,10 @@ def section_bootstrap_ci(L):
         L.append('  [MISSING]')
         return
 
+    df = _drop_observer(df)  # B.1
+
     L.append('')
-    L.append('  95% CI on mean RMSE via 1000-sample bootstrap resampling.')
+    L.append('  95% CI on mean RMSE via stationary block bootstrap (Politis-Romano).')
     L.append('  If CIs for MSM and best baseline overlap, the RMSE difference')
     L.append('  is within sampling noise and should not be emphasised.')
 
@@ -411,18 +434,21 @@ def section_bootstrap_ci(L):
                 L.append(_f('FINDING',
                     'CIs do not overlap — RMSE difference is genuine.'))
 
-#    11. QLIKE loss (Patton 2011 secondary metric)
+
+# ── 11. QLIKE loss ──
 def section_qlike(L):
-    L.append(_h('11. QLIKE LOSS (Patton 2011 — vol literature standard)'))
+    L.append(_h('11. QLIKE LOSS (assymetric secondary metric)'))
     df = _load('qlike_summary.csv')
     if df is None or df.empty:
         L.append('  [MISSING] qlike_summary.csv — re-run experiment.py and analysis.py')
         return
 
+    df = _drop_observer(df)  # B.1
+
     L.append('')
-    L.append('  QLIKE = E[RV_true/RV_pred - log(RV_true/RV_pred) - 1]')
+    L.append('  QLIKE = E[exp(δ) - δ - 1] where δ = log(rv_true) - log(rv_pred).')
     L.append('  Lower = better. Penalises underprediction of variance asymmetrically.')
-    L.append('  This is the accepted secondary metric in the HAR/Corsi vol literature.')
+    L.append('  Used to compliment RMSE; Underprediction is penalised more heavily than overprediction, which is desirable in volatility forecasting.')
 
     for model, grp in df.groupby('model_type'):
         L.append(_sub(f'Model: {model}'))
@@ -455,6 +481,8 @@ def section_qlike(L):
         L.append('  QLIKE by type (ascending):')
         for exp, q in grp.groupby('exp_type')['mean_qlike'].mean().sort_values().items():
             L.append(f'    {exp:<20} {q:.6f}{_tag(exp)}')
+
+
 # ── 12. Stratified QLIKE ──
 
 def section_stratified_qlike(L):
@@ -464,6 +492,8 @@ def section_stratified_qlike(L):
         L.append('  [MISSING] stratified_qlike.csv')
         return
 
+    df = _drop_observer(df)
+
     L.append('')
     L.append('  QLIKE split by stress vs calm regime.')
     L.append('  The hypothesis is that MSM advantage concentrates in stress windows.')
@@ -472,6 +502,12 @@ def section_stratified_qlike(L):
         L.append(_sub(f'Model: {model}'))
         if 'mean_qlike_stress' not in grp.columns:
             continue
+
+        # Print sample sizes once per model — examiners ask, "how many stress windows?"
+        if 'n_windows_stress' in grp.columns and 'n_windows_calm' in grp.columns:
+            n_s = int(grp['n_windows_stress'].dropna().iloc[0]) if not grp['n_windows_stress'].dropna().empty else 0
+            n_c = int(grp['n_windows_calm'].dropna().iloc[0]) if not grp['n_windows_calm'].dropna().empty else 0
+            L.append(f"  Sample sizes: n_stress = {n_s}, n_calm = {n_c}")
 
         grp = grp.sort_values('mean_qlike_stress', ascending=True)
         msm  = grp[grp['exp_type'].isin(MSM_TYPES)]

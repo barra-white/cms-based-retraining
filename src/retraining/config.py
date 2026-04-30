@@ -27,8 +27,6 @@ EXP_TYPE_PREFIXES = [
     'fixed', 'perf', 'adwin', 'random', 'static', 'drift_observer'
 ]
 
-# IMPORTANT: perf and adwin are now treated as baselines, not as "signal-driven"
-# competitors. Your thesis compares MSM against all existing retrainers.
 MSM_TYPES      = {'msm', 'spy_msm', 'timeout_msm', 'causal', 'weighted_msm', 'fused_msm'}
 BASELINE_TYPES = {'static', 'random', 'fixed', 'perf', 'adwin', 'revised_adwin'}
 SIGNAL_DRIVEN  = {'msm', 'spy_msm', 'timeout_msm', 'causal', 'adwin', 'perf', 'revised_adwin'}

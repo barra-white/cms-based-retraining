@@ -1,6 +1,4 @@
 '''
-lead_lag_analysis.py — RQ1 evidence (regression task).
-
 Uses the DriftSignalObserver output (frozen model) to test whether MSM
 predictively leads (a) RMSE degradation and (b) SPY_lr_local_std.
 
@@ -84,8 +82,10 @@ def granger(cause, effect, max_lag=MAX_LAG_G):
     data = np.column_stack([effect[valid], cause[valid]])
     try:
         results = grangercausalitytests(data, maxlag=max_lag, verbose=False)
-        p_values = {lag: results[lag][0]['ssr_ftest'][1]
-                    for lag in range(1, max_lag + 1)}
+        p_values = {
+            lag: results[lag][0]['ssr_ftest'][1]
+            for lag in range(1, max_lag + 1)
+        }
         return {
             'min_p':    round(min(p_values.values()), 4),
             'best_lag': min(p_values, key=p_values.get),
@@ -122,8 +122,10 @@ def plot_lag_correlations(model, xc_data, output_path):
         ax.axhline(0, color='black', lw=0.8)
         ax.axvline(0, color='grey', lw=0.5, ls='--')
         peak_lag = max(xc, key=lambda k: abs(xc[k]))
-        ax.axvline(peak_lag, color='#FB8C00', lw=1.5, alpha=0.7,
-                   label=f'Peak at lag {peak_lag} (r={xc[peak_lag]:.3f})')
+        ax.axvline(
+            peak_lag, color='#FB8C00', lw=1.5, alpha=0.7,
+            label=f'Peak at lag {peak_lag} (r={xc[peak_lag]:.3f})'
+        )
         ax.set_xlabel('Lag (positive = MSM leads)')
         ax.set_ylabel('Correlation')
         ax.set_title(title)
@@ -164,8 +166,10 @@ def plot_msm_target_overlay(model, obs, target_series, output_path):
 
     ax.set_xlabel('Window end date')
     ax.set_ylabel('Normalised value [0, 1]')
-    ax.set_title(f'MSM and {cfg.TARGET_SECONDARY} Over Time — {model}\n'
-                 f'(observer run — frozen model, no retraining)')
+    ax.set_title(
+        f'MSM and {cfg.TARGET_SECONDARY} Over Time — {model}\n'
+        f'(observer run — frozen model, no retraining)'
+    )
     ax.legend(loc='lower left', fontsize=8, ncol=2)
     ax.grid(alpha=0.2)
     plt.tight_layout()
@@ -271,9 +275,6 @@ def main():
         print(f'  Saved: {out}')
 
     print('\nDone.')
-    
-    
-    
     
 if __name__ == '__main__':
     main()
