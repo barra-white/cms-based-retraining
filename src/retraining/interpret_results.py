@@ -546,7 +546,7 @@ def section_cofiring(L):
     L.append(_h('13. CO-FIRING ANALYSIS — do MSM and baselines fire together?'))
     df = _load('cofiring_analysis.csv')
     if df is None or df.empty:
-        L.append('  [MISSING] cofiring_analysis.csv')
+        L.append('  [MISING] cofiring_analysis.csv')
         return
 
     L.append('')

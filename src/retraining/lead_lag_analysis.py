@@ -1,9 +1,20 @@
 '''
-Uses the DriftSignalObserver output (frozen model) to test whether MSM
-predictively leads (a) RMSE degradation and (b) SPY_lr_local_std.
+lead_lag_analysis.py — Lead-lag analysis between MSM and target/RMSE.
+
+CRITICAL CHANGE (vs earlier version):
+The bootstrap CI is now computed at TWO lags:
+    1. xc_best_lag    — peak of cross-correlation (often lag 0 / contemporaneous)
+    2. granger_best_lag — peak of Granger test (the PREDICTIVE lag)
+The earlier version only reported CI at xc_best_lag, which made it ambiguous
+whether the bootstrap interval supports the predictive claim. By reporting
+both, the abstract's claim that the predictive lead has bootstrap support
+is verifiable.
 
 Outputs:
     results/analysis/lead_lag_results.csv
+        Adds: xc_corr_at_granger_lag, xc_ci_lower_at_granger_lag,
+              xc_ci_upper_at_granger_lag
+
     results/plots/fig_lead_lag_{model}.png
     results/plots/fig_msm_target_overlay_{model}.png
 '''
@@ -23,9 +34,9 @@ from arch.bootstrap import StationaryBootstrap
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as cfg
 
-MODELS     = ['xgboost', 'lr', 'rf']
-MAX_LAG_XC = 10
-MAX_LAG_G  = 3
+MODELS      = ['xgboost', 'lr', 'rf']
+MAX_LAG_XC  = 10
+MAX_LAG_G   = 3
 N_BOOTSTRAP = 1000
 
 
@@ -48,7 +59,7 @@ def cross_corr(a, b, max_lag=MAX_LAG_XC):
 
 
 def bootstrap_corr_ci(a, b, lag, n_bootstrap=N_BOOTSTRAP, seed=42, block_length=10):
-    """Stationary block bootstrap for cross-correlation at a given lag."""
+    '''Stationary block bootstrap for cross-correlation at a given lag.'''
     valid = ~(np.isnan(a) | np.isnan(b))
     a, b = a[valid], b[valid]
     if lag > 0:
@@ -58,7 +69,6 @@ def bootstrap_corr_ci(a, b, lag, n_bootstrap=N_BOOTSTRAP, seed=42, block_length=
     if len(a) < max(20, 2 * block_length):
         return (np.nan, np.nan)
 
-    # Bootstrap pairs together to preserve cross-series structure
     paired = np.column_stack([a, b])
     bs = StationaryBootstrap(block_length, paired, seed=seed)
 
@@ -188,7 +198,7 @@ def main():
     records = []
     plot_data = {}
     overlay_data = {}
-    msm_target_tests_done = False  # cache flag
+    msm_target_tests_done = False
 
     for model in MODELS:
         path = f'results/experiments/{model}/drift_observer/drift_observer_results.csv'
@@ -201,56 +211,91 @@ def main():
 
         msm_graph = obs['graph_msm'].values
         msm_spy   = obs['spy_msm'].values if 'spy_msm' in obs.columns else np.full(len(obs), np.nan)
-        rmse      = obs['rmse'].values  # model-specific
+        rmse      = obs['rmse'].values
         target_secondary = align_target_to_windows(obs, full_df, cfg.TARGET_SECONDARY)
 
-        # --- MSM vs market target: ONE test total, shared across all models ---
+        # ── MSM vs market target: ONE shared test ──
         if not msm_target_tests_done:
             for sig_name, sig_series in [('graph_msm', msm_graph), ('spy_msm', msm_spy)]:
                 xc = cross_corr(sig_series, target_secondary)
                 gr = granger(sig_series, target_secondary)
-                best_lag = max(xc, key=lambda k: abs(xc[k])) if xc else None
-                best_corr = xc.get(best_lag, np.nan) if best_lag is not None else np.nan
-                if best_lag is not None:
-                    ci_lower, ci_upper = bootstrap_corr_ci(sig_series, target_secondary, best_lag)
+
+                # CI at cross-correlation peak (contemporaneous in most cases)
+                xc_best_lag = max(xc, key=lambda k: abs(xc[k])) if xc else None
+                xc_best_corr = xc.get(xc_best_lag, np.nan) if xc_best_lag is not None else np.nan
+                if xc_best_lag is not None:
+                    xc_ci_lower, xc_ci_upper = bootstrap_corr_ci(
+                        sig_series, target_secondary, xc_best_lag
+                    )
                 else:
-                    ci_lower, ci_upper = np.nan, np.nan
+                    xc_ci_lower, xc_ci_upper = np.nan, np.nan
+
+                # NEW — CI at the Granger-best lag (the PREDICTIVE lag)
+                granger_lag = gr.get('best_lag', None)
+                if granger_lag is not None and not np.isnan(gr.get('min_p', np.nan)):
+                    granger_xc_corr = xc.get(granger_lag, np.nan)
+                    granger_ci_lower, granger_ci_upper = bootstrap_corr_ci(
+                        sig_series, target_secondary, granger_lag
+                    )
+                else:
+                    granger_xc_corr = np.nan
+                    granger_ci_lower, granger_ci_upper = np.nan, np.nan
 
                 records.append({
                     'model_type': 'shared_across_models',
                     'signal': sig_name, 'vs': cfg.TARGET_SECONDARY,
-                    'xc_best_lag': best_lag,
-                    'xc_corr_at_best_lag': round(best_corr, 4) if not np.isnan(best_corr) else np.nan,
-                    'xc_ci_lower': ci_lower, 'xc_ci_upper': ci_upper,
+                    # Cross-correlation peak (typically contemporaneous)
+                    'xc_best_lag': xc_best_lag,
+                    'xc_corr_at_best_lag': round(xc_best_corr, 4) if not np.isnan(xc_best_corr) else np.nan,
+                    'xc_ci_lower': xc_ci_lower, 'xc_ci_upper': xc_ci_upper,
+                    # Granger predictive lag
                     'granger_min_p': gr['min_p'],
                     'granger_best_lag': gr['best_lag'],
                     'granger_n_obs': gr.get('n_obs', np.nan),
                     'granger_significant': (gr['min_p'] < 0.05
                                             if not np.isnan(gr.get('min_p', np.nan)) else False),
+                    # NEW — cross-correlation and CI at the PREDICTIVE lag
+                    'xc_corr_at_granger_lag': round(granger_xc_corr, 4) if not np.isnan(granger_xc_corr) else np.nan,
+                    'xc_ci_lower_at_granger_lag': granger_ci_lower,
+                    'xc_ci_upper_at_granger_lag': granger_ci_upper,
                 })
             msm_target_tests_done = True
 
-        # --- MSM vs RMSE: model-specific, legitimately per model ---
+        # ── MSM vs RMSE: per-model ──
         for sig_name, sig_series in [('graph_msm', msm_graph), ('spy_msm', msm_spy)]:
             xc = cross_corr(sig_series, rmse)
             gr = granger(sig_series, rmse)
-            best_lag = max(xc, key=lambda k: abs(xc[k])) if xc else None
-            best_corr = xc.get(best_lag, np.nan) if best_lag is not None else np.nan
-            if best_lag is not None:
-                ci_lower, ci_upper = bootstrap_corr_ci(sig_series, rmse, best_lag)
+
+            xc_best_lag = max(xc, key=lambda k: abs(xc[k])) if xc else None
+            xc_best_corr = xc.get(xc_best_lag, np.nan) if xc_best_lag is not None else np.nan
+            if xc_best_lag is not None:
+                xc_ci_lower, xc_ci_upper = bootstrap_corr_ci(sig_series, rmse, xc_best_lag)
             else:
-                ci_lower, ci_upper = np.nan, np.nan
+                xc_ci_lower, xc_ci_upper = np.nan, np.nan
+
+            granger_lag = gr.get('best_lag', None)
+            if granger_lag is not None and not np.isnan(gr.get('min_p', np.nan)):
+                granger_xc_corr = xc.get(granger_lag, np.nan)
+                granger_ci_lower, granger_ci_upper = bootstrap_corr_ci(
+                    sig_series, rmse, granger_lag
+                )
+            else:
+                granger_xc_corr = np.nan
+                granger_ci_lower, granger_ci_upper = np.nan, np.nan
 
             records.append({
                 'model_type': model, 'signal': sig_name, 'vs': 'RMSE',
-                'xc_best_lag': best_lag,
-                'xc_corr_at_best_lag': round(best_corr, 4) if not np.isnan(best_corr) else np.nan,
-                'xc_ci_lower': ci_lower, 'xc_ci_upper': ci_upper,
+                'xc_best_lag': xc_best_lag,
+                'xc_corr_at_best_lag': round(xc_best_corr, 4) if not np.isnan(xc_best_corr) else np.nan,
+                'xc_ci_lower': xc_ci_lower, 'xc_ci_upper': xc_ci_upper,
                 'granger_min_p': gr['min_p'],
                 'granger_best_lag': gr['best_lag'],
                 'granger_n_obs': gr.get('n_obs', np.nan),
                 'granger_significant': (gr['min_p'] < 0.05
                                         if not np.isnan(gr.get('min_p', np.nan)) else False),
+                'xc_corr_at_granger_lag': round(granger_xc_corr, 4) if not np.isnan(granger_xc_corr) else np.nan,
+                'xc_ci_lower_at_granger_lag': granger_ci_lower,
+                'xc_ci_upper_at_granger_lag': granger_ci_upper,
             })
 
         plot_data[model] = {
@@ -275,6 +320,7 @@ def main():
         print(f'  Saved: {out}')
 
     print('\nDone.')
-    
+
+
 if __name__ == '__main__':
     main()
