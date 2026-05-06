@@ -55,6 +55,7 @@ import os
 import re
 import sys
 import warnings
+import math
 
 import numpy as np
 import pandas as pd
@@ -103,17 +104,17 @@ plt.rcParams.update({
 
 # Colour palette: one colour per exp_type family
 PALETTE = {
-    'msm':            '#1565C0',
-    'spy_msm':        '#0D47A1',
-    'timeout_msm':    '#42A5F5',
-    'weighted_msm':   '#5E35B1',
-    'fused_msm':      '#283593',
-    'causal':         '#00838F',
+    'msm':            '#1565C0',   # dark blue
+    'spy_msm':        '#D84315',   # burnt orange
+    'timeout_msm':    '#2E7D32',   # dark green
+    'weighted_msm':   '#6A1B9A',   # purple
+    'fused_msm':      '#00838F',   # teal
+    'causal':         '#F9A825',   # amber
     'static':         '#9E9E9E',
     'random':         '#C62828',
     'fixed':          '#FB8C00',
     'perf':           '#7B1FA2',
-    'adwin':          '#2E7D32',
+    'adwin':          '#37474F',
     'revised_adwin':  '#558B2F',
     'drift_observer': '#607D8B',
 }
@@ -310,37 +311,61 @@ def _trim_trailing_nan(obs, target):
 
 def plot_rq1_overlay():
     '''
-    Two stacked panels sharing x-axis. Top: MSM. Bottom: target.
-    Trailing NaN windows dropped so the plot ends at last real data.
+    Two stacked panels sharing x-axis. Top: MSM (full sample). Bottom: target
+    (trimmed to last valid). Stress-event shading covers the union of the two
+    x-ranges, so events past the target's last valid date still appear.
+
+    Fix vs prior version: do NOT trim the MSM panel by the target's NaN tail.
+    The target requires 21 forward days to compute its forward-window mean and
+    therefore drops out around mid-2024, but the MSM signal continues through
+    early 2025 and we want the reader to see that.
     '''
     row, obs, target, signal_name = _headline_data()
     if row is None or obs is None:
         print('  [SKIP] rq1_overlay')
         return
 
-    obs, target = _trim_trailing_nan(obs, target)
-    msm_col = signal_name if signal_name in obs.columns else 'graph_msm'
-    msm_series = obs[msm_col].values
+    # --- Determine the visible x-range for each panel separately ------------
+    obs_full = obs.copy()
+    target_valid_mask = ~np.isnan(target) if target is not None else None
+    if target is not None and target_valid_mask.any():
+        last_target_idx = np.where(target_valid_mask)[0].max() + 1
+        obs_target = obs_full.iloc[:last_target_idx].copy()
+        target_trim = target[:last_target_idx]
+    else:
+        obs_target = obs_full
+        target_trim = target
+
+    msm_col = signal_name if signal_name in obs_full.columns else 'graph_msm'
+    msm_series = obs_full[msm_col].values
 
     fig, (ax_top, ax_bot) = plt.subplots(
         2, 1, figsize=(11, 6), sharex=True,
         gridspec_kw={'height_ratios': [1, 1], 'hspace': 0.12}
     )
 
-    ax_top.plot(obs['date_end'], msm_series,
+    # Top panel: full MSM signal (extends through 2025)
+    ax_top.plot(obs_full['date_end'], msm_series,
                 color=PALETTE['msm'], lw=1.6, zorder=3)
     _shade_stress(ax_top)
     ax_top.set_ylabel(f'{signal_name}\n(causal edge persistence)')
     ax_top.set_ylim(0, 1.05)
     ax_top.grid(alpha=0.25, axis='y')
 
-    ax_bot.plot(obs['date_end'], target,
+    # Bottom panel: target only where it has valid forward-window values
+    ax_bot.plot(obs_target['date_end'], target_trim,
                 color='#D81B60', lw=1.4, zorder=3)
     _shade_stress(ax_bot, label_first=False)
     ax_bot.axhline(0, color='black', lw=0.5, ls=':', alpha=0.5)
     ax_bot.set_ylabel(f'{cfg.TARGET_SECONDARY}\n(rolling-standardised return)')
     ax_bot.set_xlabel('Window end date')
     ax_bot.grid(alpha=0.25, axis='y')
+
+    # Force both axes to span the full range of the MSM signal so stress
+    # events past the target's last point are still shown on both panels.
+    full_xlim = (obs_full['date_end'].min(), obs_full['date_end'].max())
+    ax_top.set_xlim(full_xlim)
+    ax_bot.set_xlim(full_xlim)
 
     handles, labels = ax_top.get_legend_handles_labels()
     if handles:
@@ -349,11 +374,14 @@ def plot_rq1_overlay():
     _save(fig, 'fig_rq1_overlay.png')
 
 
+
 def plot_rq1_xcorr():
     '''
-    Bar chart of cross-correlation across lags. Bars at the Granger-best
-    lag and the cross-correlation peak lag are highlighted by colour only,
-    with a clean external legend. No in-figure statistical annotations.
+    Cross-correlation bars across lags -8 to +8.
+
+    The legend pattern is simplified: there are only TWO highlighted bars
+    (Pearson peak and Granger-best lag), not four. All other bars are a
+    neutral grey so the eye reads them as a single context group.
     '''
     row, obs, target, signal_name = _headline_data()
     if row is None or obs is None:
@@ -384,42 +412,73 @@ def plot_rq1_xcorr():
     xc_lag = (int(row['xc_best_lag'])
               if not pd.isna(row.get('xc_best_lag', np.nan)) else None)
 
-    fig, ax = plt.subplots(figsize=(10, 4.5))
-    colors = []
-    for lg in lags:
-        if lg == granger_lag:
-            colors.append('#FB8C00')
-        elif lg == xc_lag and lg != granger_lag:
-            colors.append(PALETTE['msm'])
-        elif lg > 0:
-            colors.append('#90CAF9')
-        elif lg < 0:
-            colors.append('#EF9A9A')
-        else:
-            colors.append('#BDBDBD')
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    # All bars start out neutral grey. Only Pearson-peak and Granger-best
+    # are recoloured to highlight them. This stops the eye from trying to
+    # distinguish "MSM-leads" vs "MSM-trails" as a meaningful split.
+    NEUTRAL_BAR = '#BDBDBD'
+    PEAK_BAR    = PALETTE['msm']    # blue
+    GRANGER_BAR = '#FB8C00'         # orange
+    colors = [NEUTRAL_BAR] * len(lags)
+    if xc_lag is not None and xc_lag in lags:
+        colors[lags.index(xc_lag)] = PEAK_BAR
+    if granger_lag is not None and granger_lag in lags:
+        colors[lags.index(granger_lag)] = GRANGER_BAR
 
     ax.bar(lags, corrs, color=colors, alpha=0.92,
            edgecolor='black', linewidth=0.5)
     ax.axhline(0, color='black', lw=0.8)
     ax.axvline(0, color='grey', lw=0.5, ls=':')
-    ax.set_xlabel('Lag (windows). Positive = MSM leads target.')
+    ax.set_xlabel('Lag (windows). Positive lag = MSM moves before returns.')
     ax.set_ylabel('Pearson cross-correlation')
     ax.set_xticks(lags)
     ax.grid(alpha=0.25, axis='y')
 
     legend_elements = [
-        mpatches.Patch(color='#FB8C00', label=f'Granger-best lag = {granger_lag}'),
-        mpatches.Patch(color=PALETTE['msm'], label=f'Peak |corr| at lag {xc_lag}'),
-        mpatches.Patch(color='#90CAF9', label='MSM leads (positive lag)'),
-        mpatches.Patch(color='#EF9A9A', label='MSM trails (negative lag)'),
+        mpatches.Patch(color=PEAK_BAR,
+                       label=f'Strongest correlation at lag {xc_lag}'),
+        mpatches.Patch(color=GRANGER_BAR,
+                       label=f'Granger-best lag = {granger_lag}'),
+        mpatches.Patch(color=NEUTRAL_BAR, label='Other lags'),
     ]
-    ax.legend(handles=legend_elements, loc='upper right')
+    ax.legend(handles=legend_elements, loc='lower right')
 
     _save(fig, 'fig_rq1_xcorr.png')
 
 
 def plot_rq1_per_event_lead():
-    '''Per-event MSM lead-time bar chart.'''
+    '''
+    Per-event MSM lead time using a single-threshold detector calibrated to
+    the actual MSM signal observed in the diagnostic record.
+
+    Operational definition:
+        Lead = days between the FIRST observer window inside the 180-day
+        pre-event search window where MSM dropped strictly below its global
+        P25, and the event date.
+
+    Three reasons not to use a sustained-low confirmation rule:
+
+      1. Direct inspection of the observer record around named events shows
+         that pre-event MSM drops are SHORT-LIVED. MSM dips below the lower
+         quartile for one or two windows then rebounds. A k-of-next-n
+         confirmation rule rejects the very signal the detector should
+         capture.
+
+      2. The 4-window MSM lookback already provides smoothing. Adding a
+         further sustained-low filter on top of an already-smoothed signal
+         double-counts the de-noising step.
+
+      3. A single-threshold rule is operationally cleaner to defend in the
+         thesis: the lead is "the date MSM first entered its lower quartile
+         within a fixed window before the event". One sentence, no
+         hyperparameters beyond the search window length.
+
+    Events whose pre-event search window lies outside the observer record
+    are reported with a distinct label so the figure does not conflate
+    "the observer never saw this event" with "the observer saw it but no
+    drop occurred".
+    '''
     row, obs, _, signal_name = _headline_data()
     if obs is None:
         print('  [SKIP] rq1_per_event_lead')
@@ -427,46 +486,79 @@ def plot_rq1_per_event_lead():
 
     msm_col = signal_name if signal_name in obs.columns else 'graph_msm'
     msm = obs[msm_col].values
-    dates = obs['date_end'].values
+    dates = pd.to_datetime(obs['date_end'].values)
 
-    rolling_lookback = 20
-    msm_series = pd.Series(msm)
-    z = ((msm_series - msm_series.rolling(rolling_lookback, min_periods=10).mean())
-         / msm_series.rolling(rolling_lookback, min_periods=10).std())
+    valid_msm = msm[~np.isnan(msm)]
+    if len(valid_msm) < 30:
+        print('  [SKIP] rq1_per_event_lead — observer record too short')
+        return
+
+    p25 = float(np.percentile(valid_msm, 25))
+    SEARCH_WINDOW_DAYS = 180
+    last_obs_date = dates.max()
 
     records = []
     for ev_name, ev_date in STRESS_EVENTS.items():
         ev_ts = pd.Timestamp(ev_date)
-        before_event = obs[obs['date_end'] <= ev_ts]
-        if len(before_event) < rolling_lookback:
-            records.append({'event': ev_name, 'lead_days': 0, 'detected': False})
+        search_start = ev_ts - pd.Timedelta(days=SEARCH_WINDOW_DAYS)
+
+        if last_obs_date < search_start:
+            records.append({
+                'event': ev_name, 'lead_days': 0,
+                'detected': False, 'reason': 'observer_truncated',
+            })
             continue
-        z_before = z.iloc[before_event.index].values
-        recent = z_before[-30:] if len(z_before) >= 30 else z_before
-        idxs = np.where(recent < -1.0)[0]
-        if len(idxs) == 0:
-            records.append({'event': ev_name, 'lead_days': 0, 'detected': False})
+
+        search_idxs = np.where((dates >= search_start) & (dates <= ev_ts))[0]
+        if len(search_idxs) == 0:
+            records.append({
+                'event': ev_name, 'lead_days': 0,
+                'detected': False, 'reason': 'no_windows_in_range',
+            })
             continue
-        first_drop = idxs[0]
-        offset = len(z_before) - len(recent) + first_drop
-        drop_date = pd.Timestamp(dates[offset])
+
+        first_drop_idx = None
+        for i in search_idxs:
+            if not np.isnan(msm[i]) and msm[i] < p25:
+                first_drop_idx = i
+                break
+
+        if first_drop_idx is None:
+            records.append({
+                'event': ev_name, 'lead_days': 0,
+                'detected': False, 'reason': 'no_drop_in_search_window',
+            })
+            continue
+
+        drop_date = dates[first_drop_idx]
+        lead = max(0, (ev_ts - drop_date).days)
         records.append({
-            'event': ev_name, 'lead_days': (ev_ts - drop_date).days,
-            'detected': True,
+            'event': ev_name, 'lead_days': lead,
+            'detected': True, 'reason': 'detected',
         })
 
     df = pd.DataFrame(records)
-    if df.empty: return
+    if df.empty:
+        return
 
     df['label'] = df['event'].apply(lambda e: e.replace('_', ' ').title())
-    df = df.iloc[::-1].reset_index(drop=True)  # most-recent at top
+    df = df.iloc[::-1].reset_index(drop=True)
 
     fig, ax = plt.subplots(figsize=(9, max(3, len(df) * 0.7)))
     colors = [PALETTE['msm'] if d else NEUTRAL for d in df['detected']]
     bars = ax.barh(df['label'], df['lead_days'], color=colors, alpha=0.92)
 
-    xmax = max(df['lead_days'].max() if df['detected'].any() else 0, 5) * 1.18
+    detected_max = df.loc[df['detected'], 'lead_days'].max() if df['detected'].any() else 0
+    xmax = max(detected_max, SEARCH_WINDOW_DAYS) * 1.20
     ax.set_xlim(0, xmax)
+    ax.axvline(SEARCH_WINDOW_DAYS, color='grey', lw=0.7, ls=':',
+               label=f'{SEARCH_WINDOW_DAYS}-day search window')
+
+    REASON_TEXT = {
+        'no_drop_in_search_window':  'no MSM drop below P25 in 180 days before event',
+        'observer_truncated':        'event lies outside observer record',
+        'no_windows_in_range':       'no observer windows in search range',
+    }
 
     for bar, row in zip(bars, df.itertuples()):
         if row.detected:
@@ -476,10 +568,11 @@ def plot_rq1_per_event_lead():
                     va='center', fontsize=9, fontweight='bold')
         else:
             ax.text(xmax * 0.01, bar.get_y() + bar.get_height() / 2,
-                    'no early signal',
+                    REASON_TEXT.get(row.reason, 'no early signal'),
                     va='center', fontsize=9, color='#616161', style='italic')
 
     ax.set_xlabel('MSM lead time before event (days)')
+    ax.legend(loc='lower right', fontsize=8)
     ax.grid(alpha=0.25, axis='x')
 
     _save(fig, 'fig_rq1_per_event_lead.png')
@@ -859,7 +952,7 @@ def plot_rq4_retrains():
            edgecolor='white', linewidth=0.6)
 
     ymax = df['fixed_retrains'].max()
-    ax.set_ylim(0, ymax * 1.32)
+    ax.set_ylim(0, ymax * 1.18)
 
     for i, row in df.iterrows():
         ax.text(i - width / 2, row['msm_retrains'] + ymax * 0.015,
@@ -868,11 +961,6 @@ def plot_rq4_retrains():
         ax.text(i + width / 2, row['fixed_retrains'] + ymax * 0.015,
                 f"{int(row['fixed_retrains'])}",
                 ha='center', va='bottom', fontsize=10, fontweight='bold')
-        savings = (1 - row['msm_retrains'] / row['fixed_retrains']) * 100
-        ax.text(i, ymax * 1.20,
-                f'{savings:.0f}% fewer',
-                ha='center', va='bottom',
-                fontsize=10, fontweight='bold', color=WIN_COLOR)
 
     ax.set_xticks(x)
     ax.set_xticklabels(df['model'])
@@ -926,10 +1014,6 @@ def plot_rq4_stress_qlike():
 
 
 def plot_rq4_selectivity_scatter(model=None):
-    '''
-    Single-model selectivity scatter. Annotation collisions handled by
-    text-shift logic. Default model is xgboost.
-    '''
     sq = _load('stratified_qlike.csv')
     fpr = _load('false_positive_rate.csv')
     if sq is None or fpr is None: return
@@ -942,79 +1026,38 @@ def plot_rq4_selectivity_scatter(model=None):
         on='retrainer', how='inner'
     )
     if merged.empty: return
-
-    merged = merged.sort_values('mean_qlike_stress')
-    merged = merged.drop_duplicates('exp_type')
     merged = merged[merged['exp_type'] != 'drift_observer']
 
-    fig, ax = plt.subplots(figsize=(11, 6.5))
+    fig, ax = plt.subplots(figsize=(10, 6))
 
-    # Sort by retrain count first for left-to-right reading
-    merged = merged.sort_values('total_retrains').reset_index(drop=True)
+    for _, row in merged.iterrows():
+        color = _col(row['exp_type'])
+        marker = 'o' if row['exp_type'] in MSM_TYPES else 's'
+        ax.scatter(row['total_retrains'], row['mean_qlike_stress'],
+                   color=color, s=180, marker=marker,
+                   edgecolor='black', linewidth=0.8,
+                   alpha=0.85, zorder=5)
 
-    # Group near-identical points and apply deterministic jitter so labels
-    # don't stack on a single physical location.
-    x_range = max(merged['total_retrains'].max() - merged['total_retrains'].min(), 1)
-    y_range = max(merged['mean_qlike_stress'].max() - merged['mean_qlike_stress'].min(), 0.01)
-    cluster_x_thresh = x_range * 0.04
-    cluster_y_thresh = y_range * 0.10
+    # Build legend from unique exp_types present
+    seen = {}
+    for _, row in merged.iterrows():
+        et = row['exp_type']
+        if et not in seen:
+            marker = 'o' if et in MSM_TYPES else 's'
+            seen[et] = plt.Line2D([0], [0],
+                marker=marker, color='w',
+                markerfacecolor=_col(et),
+                markeredgecolor='black',
+                markersize=9,
+                label=EXP_LABELS.get(et, et))
 
-    # Assign cluster IDs
-    merged['cluster_id'] = -1
-    next_cid = 0
-    for i in range(len(merged)):
-        if merged.at[i, 'cluster_id'] != -1:
-            continue
-        merged.at[i, 'cluster_id'] = next_cid
-        for j in range(i + 1, len(merged)):
-            if merged.at[j, 'cluster_id'] != -1:
-                continue
-            dx = abs(merged.at[i, 'total_retrains'] - merged.at[j, 'total_retrains'])
-            dy = abs(merged.at[i, 'mean_qlike_stress'] - merged.at[j, 'mean_qlike_stress'])
-            if dx <= cluster_x_thresh and dy <= cluster_y_thresh:
-                merged.at[j, 'cluster_id'] = next_cid
-        next_cid += 1
-
-    # Plot points and labels with cluster-aware vertical staggering
-    for cid, cluster in merged.groupby('cluster_id'):
-        n = len(cluster)
-        # Sort by y, then by retrainer name (deterministic for ties)
-        cluster_sorted = cluster.sort_values(
-            ['mean_qlike_stress', 'retrainer']
-        ).reset_index(drop=True)
-        for k, (_, row) in enumerate(cluster_sorted.iterrows()):
-            color = _col(row['exp_type'])
-            marker = 'o' if row['exp_type'] in MSM_TYPES else 's'
-            ax.scatter(row['total_retrains'], row['mean_qlike_stress'],
-                       color=color, s=220, marker=marker,
-                       edgecolor='black', linewidth=1.2, alpha=0.92, zorder=5)
-
-            # Label offset: stagger vertically within a cluster.
-            # Use a wider spacing (18 pts) for visibility.
-            label = _label(row['retrainer'])
-            if n > 1:
-                vert_shift = (k - (n - 1) / 2) * 18
-            else:
-                vert_shift = 0
-            ax.annotate(label,
-                        xy=(row['total_retrains'], row['mean_qlike_stress']),
-                        xytext=(15, vert_shift),
-                        textcoords='offset points',
-                        fontsize=9, fontweight='bold',
-                        va='center')
-
-    # Pad x-axis right edge so labels fit
-    x_min, x_max = merged['total_retrains'].min(), merged['total_retrains'].max()
-    ax.set_xlim(x_min - 1, x_max + (x_max - x_min) * 0.30 + 2)
-
-    legend_elements = [
-        mpatches.Patch(facecolor='white', edgecolor='black', label='MSM family (●)'),
-        mpatches.Patch(facecolor='white', edgecolor='black', label='Baseline (■)'),
-    ]
-    ax.legend(handles=legend_elements, loc='upper right', framealpha=0.9)
+    ax.legend(handles=list(seen.values()),
+              loc='upper right', framealpha=0.9,
+              ncol=2, fontsize=9)
 
     ax.set_xlabel('Number of retraining events')
     ax.set_ylabel('Mean QLIKE in stress windows')
+    ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
     ax.grid(alpha=0.25)
 
     if m == MAIN_MODEL:
