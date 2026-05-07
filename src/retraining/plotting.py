@@ -899,7 +899,59 @@ def plot_rq3_msm_vs_best_baseline():
 
     _save(fig, 'fig_rq3_msm_vs_best_baseline.png')
 
+def plot_rq3_r2_ladder():
+    '''
+    Pooled R^2 by retraining strategy, one panel per model. Read directly from
+    aggregate_metrics.csv (which uses pooled SS_res / SS_tot across all 1218
+    evaluation observations). Per-window R^2 is unstable for this evaluation
+    due to small within-window target variance; pooled R^2 is the appropriate
+    measure.
 
+    Story: static models pool to negative R^2 (worse than always predicting
+    the mean), every retraining strategy recovers positive R^2.
+    '''
+    df = _load('aggregate_metrics.csv')
+    if df is None or df.empty:
+        print('  [SKIP] r2_ladder — aggregate_metrics.csv missing')
+        return
+
+    df = _drop_observer(df)
+    if 'r2' not in df.columns:
+        print('  [SKIP] r2_ladder — r2 column missing')
+        return
+
+    models = sorted(df['model_type'].unique())
+    fig, axes = plt.subplots(1, len(models), figsize=(5.0 * len(models), 5.5),
+                             sharey=False, constrained_layout=True)
+    if len(models) == 1:
+        axes = [axes]
+
+    for ax, model in zip(axes, models):
+        sub = df[df['model_type'] == model].copy()
+        # Pick best config per exp_type by pooled R^2 (highest)
+        best = (sub.sort_values('r2', ascending=False)
+                .drop_duplicates('exp_type'))
+        best = best.sort_values('r2', ascending=True)
+        labels = [_label(r) for r in best['retrainer']]
+        colors = [_col(e) for e in best['exp_type']]
+
+        bars = ax.barh(labels, best['r2'], color=colors, alpha=0.92,
+                       edgecolor='white', linewidth=0.6)
+        ax.axvline(0, color='black', lw=0.8)
+
+        for bar, val in zip(bars, best['r2']):
+            offset = 0.01 if val >= 0 else -0.01
+            ha = 'left' if val >= 0 else 'right'
+            ax.text(val + offset, bar.get_y() + bar.get_height() / 2,
+                    f'{val:+.3f}', va='center', ha=ha,
+                    fontsize=8, fontweight='bold')
+
+        ax.set_xlabel('Pooled $R^2$ (across 1{,}218 observations)')
+        ax.set_title(model)
+        ax.grid(alpha=0.25, axis='x')
+
+    fig.suptitle('Pooled $R^2$ by retraining strategy', y=1.02, fontsize=11)
+    _save(fig, 'fig_rq3_r2_ladder.png')
 # ════════════════════════════════════════════════════════════════════
 #  RQ4 — Operational superiority
 # ════════════════════════════════════════════════════════════════════
@@ -1283,6 +1335,7 @@ def main():
     plot_rq3_dm_winrate()
     plot_rq3_stratified_qlike(model=MAIN_MODEL)
     plot_rq3_msm_vs_best_baseline()
+    plot_rq3_r2_ladder()
 
     print('\n═══ RQ4: Operational superiority ═══')
     plot_rq4_retrains()

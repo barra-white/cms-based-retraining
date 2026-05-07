@@ -301,6 +301,9 @@ def cooldown_analysis(df):
 
 # ── 8. STRESS vs CALM (RMSE) ──
 def stress_period_rmse(df):
+    # Regime classified by date_end (window end). This matches the convention
+    # used in stratified_qlike, regime_retrain_rate, and stress_conditional_metrics.
+    # All chapter figures and prose use this convention.
     data = df.copy()
     data['regime'] = data['date_end'].apply(
         lambda d: 'stress' if in_stress_window(d) else 'calm'
@@ -594,6 +597,8 @@ def qlike_summary(df):
 
 # ── 15. STRATIFIED QLIKE (by regime) ──
 def stratified_qlike(df):
+    # Regime classified by date_end (window end). Convention is consistent
+    # with stress_period_rmse, regime_retrain_rate, stress_conditional_metrics.
     """
     QLIKE split by stress vs calm regime. Expected finding: MSM advantage
     is concentrated in stress windows because stress is exactly when causal
