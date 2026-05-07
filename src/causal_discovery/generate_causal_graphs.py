@@ -12,13 +12,24 @@ from tigramite.independence_tests.robust_parcorr import RobustParCorr
 np.random.seed(42)
 
 # read data in
-df = pd.read_csv("data/processed/standardized_data.csv",parse_dates=["Date"])
-feature_cols = [col for col in df.columns if col != "Date"] # extract feature col names
+df = pd.read_csv("data/processed/standardized_data.csv", parse_dates=["Date"])
 
-df = df.dropna(subset=feature_cols).reset_index(drop=True) # drop empty rows after transformation
+# Restrict causal discovery to the 11 graph variables defined in the
+# methodology (Chapter 3). Excluding forecast targets prevents leakage:
+# SPY_logrv_5d, SPY_logrv_20d, SPY_lr_local_std, SPY_vol_change_5d,
+# and SPY_vol_direction_5d are all forward-looking and must not enter
+# the causal graph as nodes.
+GRAPH_VARS = [
+    'SPY_lr', 'GLD_lr', 'UUP_lr', 'USO_lr', 'VIX_ld',
+    'OVX', 'MOVE_d', 'T10Y2Y_d', 'BAA10Y_d', 'DGS10_d', 'USEPUINDXD_ld'
+]
+missing = [v for v in GRAPH_VARS if v not in df.columns]
+if missing:
+    raise ValueError(f"Missing graph variables in CSV: {missing}")
 
-data = df[feature_cols].to_numpy()
-var_names = feature_cols
+df = df.dropna(subset=GRAPH_VARS).reset_index(drop=True)
+data = df[GRAPH_VARS].to_numpy()
+var_names = GRAPH_VARS
 
 T, N = data.shape
 

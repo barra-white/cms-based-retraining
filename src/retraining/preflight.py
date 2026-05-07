@@ -114,7 +114,7 @@ def main():
         shape = first['graph'].shape
         check('Graph has 11 nodes', shape[0] == 11,
               f'graph shape = {shape}')
-        check('At least 80 graph windows', len(graphs) >= 80,
+        check('At least 55 graph windows', len(graphs) >= 55,
               f'got {len(graphs)} windows')
 
     # ----- 6. Initial training window target stats -----

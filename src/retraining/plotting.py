@@ -1095,10 +1095,6 @@ def plot_rq5_feature_persistence():
 
 
 def plot_rq5_unstable_edges():
-    '''
-    Most-frequently-flagged unstable edges across MSM retrain events.
-    Edge labels resolved to readable form.
-    '''
     raw_path = 'results/experiments/all_results.csv'
     if not os.path.exists(raw_path):
         print('  [SKIP] rq5_unstable_edges')
@@ -1106,12 +1102,20 @@ def plot_rq5_unstable_edges():
 
     df = pd.read_csv(raw_path, parse_dates=['date_start', 'date_end'])
     df['exp_type'] = df['retrainer'].apply(get_experiment_type)
-    msm_retrains = df[df['exp_type'].isin(MSM_TYPES) & df['retrain_triggered']]
+    msm_retrains = df[
+        df['exp_type'].isin(MSM_TYPES) &
+        (df['retrain_triggered'] == True)
+    ]
     if msm_retrains.empty or 'unstable_edges' not in msm_retrains.columns:
         return
 
+    # One record per unique window per model — ignores which retrainer fired
+    msm_retrains_deduped = msm_retrains.drop_duplicates(
+        subset=['model_type', 'window']
+    )
+
     edge_counts = {}
-    for _, row in msm_retrains.iterrows():
+    for _, row in msm_retrains_deduped.iterrows():
         ue = row['unstable_edges']
         if pd.isna(ue) or ue in ('', '{}'):
             continue
@@ -1136,7 +1140,7 @@ def plot_rq5_unstable_edges():
     for i, c in enumerate(counts):
         ax.text(c + cmax * 0.01, i, str(c),
                 va='center', fontsize=9, fontweight='bold')
-    ax.set_xlabel('Number of MSM retrain events where edge was flagged unstable')
+    ax.set_xlabel('Number of evaluation windows where edge was flagged unstable')
     ax.invert_yaxis()
     ax.grid(alpha=0.25, axis='x')
 

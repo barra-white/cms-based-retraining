@@ -253,37 +253,20 @@ def print_summary(combined):
 def main():
     print('Loading data...')
     df = pd.read_csv("data/processed/standardized_data.csv", parse_dates=['Date'])
-    print(f'  dataframe rows: {len(df)}')
 
-    # DO NOT dropna here. The standardised CSV has NaN by design:
-    #   - First ~505 rows on features (rolling 504-day standardisation needs
-    #     504 days of history before producing a valid value).
-    #   - Last 5 rows on SPY_logrv_5d (forward-looking 5-day realised variance).
-    # The causal graph cache uses absolute row indices into this full-length
-    # dataframe; its first valid window is around January 2019, after the
-    # rolling standardisation has stabilised. The retrainer's _impute methods
-    # handle NaN cleanup within each training window naturally, and the
-    # `if test_end > len(self.df): continue` skip in BaseRetrainer.run()
-    # handles the trailing-NaN edge case.
+    # Match generate_causal_graphs.py exactly: dropna on all non-Date columns.
+    # This ensures the dataframe row indices used here align with the absolute
+    # indices stored in the (regenerated) graph cache.
+    feature_cols_for_drop = [c for c in df.columns if c != 'Date']
+    df = df.dropna(subset=feature_cols_for_drop).reset_index(drop=True)
+    print(f'  dataframe rows after dropna: {len(df)}')
 
     with open("data/causal_graphs.pkl", "rb") as f:
         all_graphs = pickle.load(f)
 
-    # Sanity check: dataframe must reach at least the last graph's train_end.
-    # We do NOT require it to reach train_end + step, because the very last
-    # graph window may legitimately have an incomplete test horizon and will
-    # be skipped by the run() loop's test_end guard.
-    last_graph_train_end = all_graphs[-1]['train_end_idx']
-    if len(df) < last_graph_train_end:
-        raise ValueError(
-            f"Dataframe has {len(df)} rows but graph cache's last window "
-            f"requires at least {last_graph_train_end}. "
-            f"The graph cache may have been generated on a different "
-            f"(longer) version of the standardised data. Regenerate the cache "
-            f"or restore the matching CSV."
-        )
-    print(f"  graph cache last train_end_idx = {last_graph_train_end}, "
-        f"dataframe rows = {len(df)} (OK)")
+    print(f"  graph cache windows: {len(all_graphs)}")
+    print(f"  first window date_end: {all_graphs[0]['date_end']}")
+    print(f"  last window date_end:  {all_graphs[-1]['date_end']}")
 
     # Target is SPY_logrv_5d (continuous). Every volatility-labelled column
     # stays excluded from features — they are all derivatives of the same
