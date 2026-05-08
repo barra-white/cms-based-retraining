@@ -251,19 +251,39 @@ def _resolve_observer_path():
 
 
 def _headline_data():
-    '''Load lead-lag headline row + observer + aligned target. Drops trailing
-    NaN windows so plots end at the last real data point.'''
+    '''
+    Load the headline lead-lag row + observer windows + per-window RMSE target.
+
+    Signal priority:
+      1. Per-model (MAIN_MODEL) graph_msm → RMSE  — the significant result
+      2. shared_across_models graph_msm            — fallback if above absent
+
+    Target: the 'rmse' column from the observer results CSV (one value per
+    evaluation window, already aligned by construction). This avoids the
+    aggregate_metrics.csv which is a summary file with no per-window dates.
+    '''
     lag_df = _load('lead_lag_results.csv')
     if lag_df is None or lag_df.empty:
         return None, None, None, None
 
-    primary = lag_df[(lag_df['model_type'] == 'shared_across_models')
-                     & (lag_df['signal'] == 'spy_msm')
-                     & (lag_df['vs'] == cfg.TARGET_SECONDARY)]
+    # Normalise 'vs' for case-insensitive matching
+    if 'vs' in lag_df.columns:
+        vs_upper = lag_df['vs'].str.upper()
+    else:
+        vs_upper = pd.Series([''] * len(lag_df), index=lag_df.index)
+
+    # Primary: per-model significant result (graph_msm → RMSE, xgboost)
+    primary = lag_df[
+        (lag_df['model_type'] == MAIN_MODEL) &
+        (lag_df['signal'] == 'graph_msm') &
+        (vs_upper == 'RMSE')
+    ]
     if primary.empty:
-        primary = lag_df[(lag_df['model_type'] == 'shared_across_models')
-                         & (lag_df['signal'] == 'graph_msm')
-                         & (lag_df['vs'] == cfg.TARGET_SECONDARY)]
+        # Fallback: shared graph_msm row (non-RMSE target)
+        primary = lag_df[
+            (lag_df['model_type'] == 'shared_across_models') &
+            (lag_df['signal'] == 'graph_msm')
+        ]
     if primary.empty:
         return None, None, None, None
 
@@ -277,17 +297,11 @@ def _headline_data():
     obs = pd.read_csv(obs_path, parse_dates=['date_start', 'date_end'])
     obs = obs.sort_values('window').reset_index(drop=True)
 
-    # Align target: forward 21 days from each observer date_end. Last 21
-    # observer windows have empty forward-window so target becomes NaN.
-    full_df = _load_full_df()
-    target = []
-    if full_df is not None and cfg.TARGET_SECONDARY in full_df.columns:
-        for _, r in obs.iterrows():
-            mask = full_df['Date'] > pd.Timestamp(r['date_end'])
-            slc = full_df[mask].head(21)
-            target.append(slc[cfg.TARGET_SECONDARY].mean()
-                          if len(slc) >= 10 else np.nan)
-        target = np.array(target)
+    # Use per-window RMSE directly from the observer results CSV.
+    # This is guaranteed to be aligned with obs rows (same file, same windows).
+    # aggregate_metrics.csv is a summary file only — do NOT use it here.
+    if 'rmse' in obs.columns:
+        target = obs['rmse'].values.astype(float)
     else:
         target = np.full(len(obs), np.nan)
 
@@ -311,21 +325,19 @@ def _trim_trailing_nan(obs, target):
 
 def plot_rq1_overlay():
     '''
-    Two stacked panels sharing x-axis. Top: MSM (full sample). Bottom: target
-    (trimmed to last valid). Stress-event shading covers the union of the two
-    x-ranges, so events past the target's last valid date still appear.
+    Two stacked panels sharing x-axis.
+    Top:    graph_msm (full observer record).
+    Bottom: per-window RMSE from the drift observer (trimmed to last valid).
 
-    Fix vs prior version: do NOT trim the MSM panel by the target's NaN tail.
-    The target requires 21 forward days to compute its forward-window mean and
-    therefore drops out around mid-2024, but the MSM signal continues through
-    early 2025 and we want the reader to see that.
+    The bottom panel shows rolling RMSE rather than a financial return series
+    because the Granger test is graph_msm → RMSE (significant for both
+    XGBoost p=0.021 and RF p=0.028). RMSE is always positive so no zero-line.
     '''
     row, obs, target, signal_name = _headline_data()
     if row is None or obs is None:
         print('  [SKIP] rq1_overlay')
         return
 
-    # --- Determine the visible x-range for each panel separately ------------
     obs_full = obs.copy()
     target_valid_mask = ~np.isnan(target) if target is not None else None
     if target is not None and target_valid_mask.any():
@@ -344,25 +356,24 @@ def plot_rq1_overlay():
         gridspec_kw={'height_ratios': [1, 1], 'hspace': 0.12}
     )
 
-    # Top panel: full MSM signal (extends through 2025)
+    # Top panel: full graph_msm signal
     ax_top.plot(obs_full['date_end'], msm_series,
                 color=PALETTE['msm'], lw=1.6, zorder=3)
     _shade_stress(ax_top)
-    ax_top.set_ylabel(f'{signal_name}\n(causal edge persistence)')
+    ax_top.set_ylabel('graph_msm\n(causal edge persistence)')
     ax_top.set_ylim(0, 1.05)
     ax_top.grid(alpha=0.25, axis='y')
 
-    # Bottom panel: target only where it has valid forward-window values
+    # Bottom panel: per-window RMSE (drift observer, MAIN_MODEL)
+    # RMSE is always positive — no zero-line needed.
     ax_bot.plot(obs_target['date_end'], target_trim,
                 color='#D81B60', lw=1.4, zorder=3)
     _shade_stress(ax_bot, label_first=False)
-    ax_bot.axhline(0, color='black', lw=0.5, ls=':', alpha=0.5)
-    ax_bot.set_ylabel(f'{cfg.TARGET_SECONDARY}\n(rolling-standardised return)')
+    ax_bot.set_ylabel('Rolling RMSE\n(drift observer)')
     ax_bot.set_xlabel('Window end date')
     ax_bot.grid(alpha=0.25, axis='y')
 
-    # Force both axes to span the full range of the MSM signal so stress
-    # events past the target's last point are still shown on both panels.
+    # Both panels share the full MSM x-range so stress shading is consistent
     full_xlim = (obs_full['date_end'].min(), obs_full['date_end'].max())
     ax_top.set_xlim(full_xlim)
     ax_bot.set_xlim(full_xlim)
@@ -430,7 +441,7 @@ def plot_rq1_xcorr():
            edgecolor='black', linewidth=0.5)
     ax.axhline(0, color='black', lw=0.8)
     ax.axvline(0, color='grey', lw=0.5, ls=':')
-    ax.set_xlabel('Lag (windows). Positive lag = MSM moves before returns.')
+    ax.set_xlabel('Lag (windows). Positive lag = MSM moves before RMSE.')
     ax.set_ylabel('Pearson cross-correlation')
     ax.set_xticks(lags)
     ax.grid(alpha=0.25, axis='y')
